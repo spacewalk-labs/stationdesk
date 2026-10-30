@@ -1,15 +1,40 @@
 # StationDesk
 
-A personal workspace for one owner, on Ubuntu 24.04 with Python 3.11+.
-Run the installer. Only your Tailscale identity gets in.
+Your AI agents and tools, on your own computer. StationDesk is a personal workspace
+for one owner, accessed through your Tailscale identity.
 
-The graphical setup app guides you through preparation, app selection, Tailscale
-sign-in, installation, and opening your workspace. It starts in English, with a
-Korean option. Ubuntu uses a `.deb` package; macOS uses `StationDesk Setup.app`
-from `StationDesk-Setup-mac.zip`. See [GUI installer build and test notes](installer/README.md).
-Download setup from [GitHub Releases](https://github.com/spacewalk-labs/stationdesk/releases/latest).
-The release includes SHA256 checksums and notes about Mac signing.
-The terminal entry points below remain available.
+[Website](https://stationdesk.ai/) · [Source](https://github.com/spacewalk-labs/stationdesk) · [Releases](https://github.com/spacewalk-labs/stationdesk/releases/latest) · [Installation guide](installer/README.md)
+
+## Download and install
+
+The setup app walks you through preparation, apps, Tailscale sign-in and installation.
+English is the default; Korean is available. No terminal commands or StationDesk
+account are needed for graphical setup. An internet connection is required.
+
+| Computer | Download v0.1.3 | Requirements |
+| --- | --- | --- |
+| Mac | [StationDesk-Setup-mac.zip](https://github.com/spacewalk-labs/stationdesk/releases/download/v0.1.3/StationDesk-Setup-mac.zip) | Apple silicon; macOS 14+ for the current [OrbStack](https://orbstack.dev/download) |
+| Ubuntu | [stationdesk-installer_0.1.3_all.deb](https://github.com/spacewalk-labs/stationdesk/releases/download/v0.1.3/stationdesk-installer_0.1.3_all.deb) | Ubuntu 24.04 desktop with a systemd user session |
+
+[Release notes and SHA256 checksums](https://github.com/spacewalk-labs/stationdesk/releases/tag/v0.1.3).
+The GitHub **Code → Download ZIP** button downloads source code, not the setup app.
+
+**Mac:** unzip, move **StationDesk Setup.app** to Applications and open it.
+This release is **not notarized by Apple**; macOS may block first launch.
+Follow the [Mac first-open and OrbStack steps](installer/README.md#mac-apple-silicon).
+
+**Ubuntu:** install the DEB using your graphical package installer, then open
+**StationDesk Setup** from your app launcher.
+
+Follow the app to prepare the machine, choose apps, connect Tailscale and install.
+On the Ready screen choose **Open StationDesk**. Your browser device, including
+the Mac hosting OrbStack, needs Tailscale signed in as the same personal owner.
+See the [complete installation and first-access guide](installer/README.md).
+
+## Install from source (terminal)
+
+Run these commands **inside Ubuntu**, including an OrbStack Ubuntu machine on Mac.
+Python 3.11+ is required. For the graphical setup app, use the downloads above.
 
 Install Git, curl and Tailscale, log in to Tailscale, then run `bash install.sh`
 from a user session with `systemd --user`. No StationDesk account or setup configuration
@@ -84,5 +109,13 @@ On macOS, `install-mac.command` creates an OrbStack Ubuntu machine and invokes t
 same installer inside it. OrbStack and a logged-in Tailscale inside Ubuntu are prerequisites.
 
 Undo the operator assignment with `sudo tailscale set --operator=`.
+
+## Source, help and licensing
+
+- [Report a bug](https://github.com/spacewalk-labs/stationdesk/issues) with your OS, release version and the relevant error. Remove passwords, tokens and private details from logs before posting.
+- [Report security vulnerabilities privately](SECURITY.md); do not post them in a public issue.
+- [Contribution policy](CONTRIBUTING.md): external code contributions are not accepted.
+- StationDesk code is licensed under [AGPL-3.0](LICENSE). Third-party components retain their own licenses; see [NOTICE](NOTICE), including upstream repositories and bundled modifications.
+- [App contract and decisions](docs/decisions.md) explains how to add an app. The software in this repository is the public product; setup packages are under [Releases](https://github.com/spacewalk-labs/stationdesk/releases/latest).
 
 Run source tests with `python3 -m unittest discover tests`.

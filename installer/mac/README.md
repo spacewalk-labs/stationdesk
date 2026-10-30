@@ -1,16 +1,16 @@
 # macOS setup app
 
-Build on macOS 13 or later with the Apple command line tools installed:
+From the source repository root, build on macOS 13 or later with the Apple command line tools installed:
 
 ```sh
-bash product/installer/mac/build.sh /absolute/path/to/output
+bash installer/mac/build.sh /absolute/path/to/output
 open '/absolute/path/to/output/StationDesk Setup.app'
 ```
 
 The output contains the SwiftUI app and `StationDesk-Setup-mac.zip`. The app carries
 `setup.sh` and a product-only `source.bundle`; it does not require Python on macOS.
 OrbStack is obtained through its official download page, rather than bundled.
-The app is ad hoc signed for internal testing, without notarization or App Store
+The current release is ad hoc signed, without notarization or App Store
 registration. Its architecture matches the build machine.
 
 Commands run asynchronously with argv, and original log lines are shown in a

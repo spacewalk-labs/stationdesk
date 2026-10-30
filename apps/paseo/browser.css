@@ -1,0 +1,4 @@
+/* Keep the floating Porthole above the desktop sidebar actions. */
+@media (min-width: 761px) {
+  :root { --stationdesk-porthole-bottom: 48px; }
+}

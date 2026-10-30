@@ -27,6 +27,7 @@
 <link rel="stylesheet" href="/assets/stationdesk-tokens.css">
 <link rel="stylesheet" href="/assets/devmon-card-ui.css">
 <link rel="stylesheet" href="/assets/devmon-inbox.css">
+<link rel="stylesheet" href="/assets/accounts.css">
 <script src="/assets/app-badges.js"></script>
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 
@@ -49,6 +50,11 @@
   header { max-width: var(--stationdesk-page); margin: 0 auto 2rem; display: flex; align-items: center; gap: 1rem;
            flex-wrap: wrap; position: relative;   /* anchors the settings sheet */
            padding-bottom: 0.9rem; border-bottom: 1px solid var(--stationdesk-hairline); }
+  .header-controls { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+  @media (max-width: 560px) {
+    header { gap: 12px; }
+    .header-controls { flex-basis: 100%; justify-content: flex-end; gap: 10px; }
+  }
   h1 { font-size: 1.25rem; margin: 0; letter-spacing: -0.02em; font-weight: 700;
        flex: 1; min-width: max-content; white-space: nowrap; }
   .wordmark-i { position: relative; display: inline-block; }
@@ -75,53 +81,6 @@
   .who i { display: grid; place-items: center; width: 30px; height: 30px; flex: none;
            border-radius: 50%; background: var(--stationdesk-primary); color: var(--stationdesk-on-primary);
            font-style: normal; font-weight: 700; font-size: 0.8rem; }
-  /* The pill is the entrance to subscription accounts (owner decision, confirmed
-     mockup 9: the settings sheet has no subscription row — this does, because the
-     pill is already the place that says whose box this is). [data-acct] is set by
-     script only once there is a panel to open, so an unwired pill keeps exactly
-     the plain-label look it has today. */
-  .who[data-acct] { cursor: pointer; color: var(--stationdesk-ink); }
-  .who[data-acct]:hover { background: var(--stationdesk-surface-1); }
-  .who[data-acct]:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
-  /* Warning ring. The level comes from the platform account surface's /acct-alert
-     (hub prefix, same origin) — the same verdict
-     devterm's own account icon and the return widget's ring read, so all three
-     change colour at the same instant and no threshold is restated here. Amber
-     warns; red blinks, because a static ring on something you have learnt to
-     ignore has stopped being a warning. */
-  .who[data-acct-level="warn"] { border-color: var(--stationdesk-warning); color: var(--stationdesk-warning); }
-  .who[data-acct-level="crit"] { border-color: var(--stationdesk-danger); color: var(--stationdesk-danger);
-                                 animation: acct-ring-blink 1.4s steps(1, end) infinite; }
-  @keyframes acct-ring-blink { 50% { border-color: var(--stationdesk-hairline); } }
-  @media (prefers-reduced-motion: reduce) {
-    .who[data-acct-level="crit"] { animation: none; }
-  }
-
-  /* Subscription panel, opened from the pill. The panel is the platform asset at
-     hub/assets/accounts/ — the same file devterm's account icon and the return
-     widget's menu open, so there is one implementation with three hosts. It has to
-     be an iframe on devterm's origin rather than a copy here: every fetch inside it
-     is a root-absolute path that only that gate answers. This is just the modal
-     around it, in the hub's own tokens. */
-  .acct-modal { position: fixed; inset: 0; z-index: 60; display: flex;
-                align-items: center; justify-content: center;
-                padding: var(--stationdesk-sp-4); background: rgba(0, 0, 0, .6); }
-  .acct-box { display: flex; flex-direction: column; overflow: hidden;
-              width: min(460px, 100%); height: min(620px, 92vh);
-              border: 1px solid var(--stationdesk-hairline); border-radius: var(--stationdesk-r-lg);
-              background: var(--stationdesk-surface-1); box-shadow: var(--stationdesk-shadow-hover); }
-  .acct-head { flex: 0 0 auto; display: flex; align-items: center; gap: var(--stationdesk-sp-3);
-               padding: var(--stationdesk-sp-3) var(--stationdesk-sp-4);
-               border-bottom: 1px solid var(--stationdesk-hairline);
-               font-size: 0.95rem; font-weight: var(--stationdesk-fw-semibold); }
-  .acct-ttl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .acct-x { flex: none; width: 34px; height: 30px; border: 0; cursor: pointer;
-            border-radius: var(--stationdesk-r-sm); background: var(--stationdesk-surface-2);
-            color: var(--stationdesk-ink); font: inherit; font-size: 1rem; line-height: 1; }
-  .acct-x:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
-  .acct-frame { flex: 1 1 auto; width: 100%; border: 0; background: var(--stationdesk-surface-1); }
-  .acct-note { padding: var(--stationdesk-sp-4); color: var(--stationdesk-body);
-               font-size: 0.85rem; line-height: 1.55; word-break: break-word; }
   main { max-width: var(--stationdesk-page); margin: 0 auto; }
   /* ── the named line ────────────────────────────────────────────────────
      The one divider on the home screen, and the owner names it. It spans the
@@ -432,6 +391,9 @@
   .set-name { font-size: 0.95rem; font-weight: var(--stationdesk-fw-semibold); }
   .set-note { color: var(--stationdesk-mute); font-size: 0.82rem; line-height: 1.45; margin-top: 3px; }
   .set-quiet { color: var(--stationdesk-mute); font-size: 0.85rem; padding: var(--stationdesk-sp-4) 0; }
+  .set-acc-title { flex: 1; }
+  .set-acc-sum { font-weight: var(--stationdesk-fw-medium); color: var(--stationdesk-mute); }
+  .set-acc-sum[data-alert="true"] { color: var(--stationdesk-danger); }
   .set-foot { color: var(--stationdesk-mute); font-size: 0.76rem; line-height: 1.5;
               margin: var(--stationdesk-sp-5) 0 0; padding-top: var(--stationdesk-sp-4);
               border-top: 1px solid var(--stationdesk-hairline); }
@@ -668,6 +630,7 @@
 
 <header>
   <h1 id="product" aria-label="StationDesk"><span aria-hidden="true">Stat<span class="wordmark-i">ı</span>onDesk</span></h1>
+  <div class="header-controls">
   <button type="button" class="find-open" id="find-open" aria-label="Search apps" data-i18n-ko-aria-label="앱 검색"
           aria-expanded="false" aria-controls="launcher-find" hidden>
     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"></circle><path d="m16 16 4.2 4.2"></path></svg>
@@ -684,6 +647,7 @@
   </button>
   <button type="button" class="theme-cycle" id="theme-cycle" aria-label="Appearance: Auto"></button>
   <span class="who" id="who"><i aria-hidden="true"></i><span></span></span>
+  </div>
   <!-- Settings sheet retains the current agent preference and opens account management. -->
   <div class="settings" id="settings-panel" role="group" aria-labelledby="set-title" hidden>
     <div class="set-ttl" id="set-title" data-i18n-ko="StationDesk 설정">StationDesk settings</div>
@@ -713,10 +677,10 @@
       </div>
     </section>
     <section class="set-sec">
-      <div class="set-h" data-i18n-ko="계정">Accounts</div>
-      <div class="set-row"><div class="set-txt"><div class="set-name" data-i18n-ko="에이전트 계정">Agent accounts</div><div class="set-note">Claude Code · Codex · OpenCode · agy</div></div><a class="set-see" href="/accounts/" data-i18n-ko="열기">Open</a></div>
+      <div class="set-h"><span class="set-acc-title" data-i18n-ko="에이전트 계정">Agent accounts</span><span class="set-acc-sum" id="set-acc-sum"></span></div>
+      <div id="set-accounts"></div>
     </section>
-    <p class="set-foot" id="set-foot" data-i18n-ko="이 박스의 에이전트 로그인 상태를 확인합니다.">Check agent sign-in status on this box.</p>
+    <p class="set-foot" id="set-foot" data-i18n-ko="자격 증명은 각 에이전트 CLI 만 보관합니다.">Only each agent’s CLI keeps its credentials.</p>
   </div>
 </header>
 
@@ -1767,6 +1731,7 @@ if (("standalone" in navigator) && navigator.standalone) {
 }
 </script>
 
+<script src="/assets/accounts.js"></script>
 <script src="/assets/devmon-card-ui.js"></script>
 <script src="/assets/devmon-inbox.js"></script>
 <script>
@@ -2262,8 +2227,15 @@ if (("standalone" in navigator) && navigator.standalone) {
   const gear = document.getElementById('settings-open');
   const panel = document.getElementById('settings-panel');
   gear.hidden = false;
-  gear.addEventListener('click', () => { panel.hidden = !panel.hidden; gear.setAttribute('aria-expanded', String(!panel.hidden)); });
-  document.addEventListener('click', event => { if (!panel.hidden && !panel.contains(event.target) && !gear.contains(event.target)) { panel.hidden = true; gear.setAttribute('aria-expanded','false'); } });
+  // Each status read runs the vendor CLIs, so the account list loads when the sheet first opens.
+  let accounts = null;
+  gear.addEventListener('click', () => {
+    panel.hidden = !panel.hidden; gear.setAttribute('aria-expanded', String(!panel.hidden));
+    if (!panel.hidden && !accounts) accounts = StationDeskAccounts.mountList(document.getElementById('set-accounts'), {summary: document.getElementById('set-acc-sum')});
+  });
+  // A row re-renders on click and the account sheet sits outside the panel: neither is an outside click.
+  document.addEventListener('click', event => { if (!panel.hidden && event.target.isConnected && !event.target.closest('.acc-veil') && !panel.contains(event.target) && !gear.contains(event.target)) { panel.hidden = true; gear.setAttribute('aria-expanded','false'); } });
+
   document.addEventListener('keydown', event => { if (event.key === 'Escape') { panel.hidden = true; gear.setAttribute('aria-expanded','false'); } });
   let wanted = new Set();
   const home = document.getElementById('home');

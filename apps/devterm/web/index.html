@@ -35,6 +35,9 @@ window.__DEVTERM = { fileview: true };
           padding: calc(5px + env(safe-area-inset-top)) calc(6px + env(safe-area-inset-right)) 5px
                    calc(6px + env(safe-area-inset-left));
           background: #1e2230; border-bottom: 1px solid #2a3142; }
+  #terminal-icon { width: 24px; height: 24px; flex: none; border-radius: 6px; }
+  :root:has(#app.mkeys-on:not(.mkeys-top)) { --stationdesk-porthole-bottom: 44px; }
+  :root:has(#app:not(.mkeys-on)), :root:has(#app.mkeys-top) { --stationdesk-porthole-bottom: 20px; }
   #tabnames { flex: 1 1 auto; display: flex; align-items: center; gap: 4px; min-height: 32px;
               overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch;
               padding-left: 8px; border-left: 1px solid #2f3542; }   /* left divider = StationDesk rail vs session tabs */
@@ -157,6 +160,7 @@ window.__DEVTERM = { fileview: true };
 <body>
 <div id="app">
   <div id="tabs">
+    <img id="terminal-icon" src="favicon.svg" alt="" title="Terminal">
     <div id="tabnames"></div>
     <div id="tabctrls"></div>
   </div>

@@ -2324,6 +2324,6 @@ bootstrapTree().then(function () {
       'html,body{height:100%;}' +
       'body{margin:0;padding:0;max-width:none;display:flex;align-items:center;justify-content:center;background:var(--bg);}' +
       '.empty{color:var(--text-muted);font-family:var(--font-sans);font-size:var(--fs-md);}',
-      '<div class="empty">No file selected</div>'));
+      '<div class="empty">Select a file from the sidebar to preview it.</div>'));
   }
 });

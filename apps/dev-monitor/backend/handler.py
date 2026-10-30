@@ -181,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
                 if action in ('read', 'archive'):
                     return self.reply(200, cards.transition(card_id, action))
             if route == '/accounts/action':
-                return self.reply(200, accounts.action(data['agent'], data['action'], root))
+                return self.reply(200, accounts.action(data['agent'], data['action'], root, data.get('value')))
             if route == '/api/store':
                 return self.reply(202, Store(root).start(data['action'], data['id']))
             return self.reply(404, {'error': 'Unknown route'})

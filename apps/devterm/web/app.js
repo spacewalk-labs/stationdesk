@@ -983,6 +983,7 @@ function applyMobileKeys() {
   setMobileKeysVisible(show);
   buildControls();
   refreshPaneZoom();
+  window.dispatchEvent(new Event('stationdesk:layout-changed'));
 }
 
 // ---- WS / ttyd protocol ----
@@ -1019,7 +1020,7 @@ function onMsg(ev) {
 }
 function setTitle() {
   const s = currentSession();
-  document.title = 'dev-term' + (s && s !== 'main' ? ' · ' + s : '');
+  document.title = 'Terminal' + (s && s !== 'main' ? ' · ' + s : '');
 }
 setTitle();
 

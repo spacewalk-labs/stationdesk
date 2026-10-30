@@ -1,3 +1,5 @@
+<img src="installer/assets/stationdesk.png" alt="StationDesk logo" width="96" height="96">
+
 # StationDesk
 
 Your AI agents and tools, on your own computer. StationDesk is a personal workspace

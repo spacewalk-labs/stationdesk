@@ -1,0 +1,13 @@
+[Unit]
+Description=StationDesk Paseo cross-device sidebar state
+After=network.target
+[Service]
+Type=simple
+Environment=STATIONDESK_PASEO_UISTATE_PORT=19954
+ExecStart=/bin/bash -c 'export STATIONDESK_PASEO_UISTATE_DIR="$$STATIONDESK_ROOT/state/paseo-ui-state"; exec /usr/bin/python3 "$$STATIONDESK_APP_DIR/backend/stationdesk-paseo-uistate.py"'
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+[Install]
+WantedBy=default.target

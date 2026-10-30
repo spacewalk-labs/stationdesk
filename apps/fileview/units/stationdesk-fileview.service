@@ -1,0 +1,10 @@
+[Unit]
+Description=StationDesk file API
+
+[Service]
+ExecStart=/usr/bin/env ${STATIONDESK_ROOT}/runtime/fileview/filebrowser --database ${STATIONDESK_STATE}/fileview/fb.db --root %h --address 127.0.0.1 --port ${STATIONDESK_PORT} --followExternalSymlinks=false --disableTypeDetectionByHeader
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

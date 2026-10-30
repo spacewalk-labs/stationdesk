@@ -1,0 +1,5 @@
+label = "Terminal"
+description = "Web terminal"
+description_ko = "웹 터미널"
+icon = "icon.svg"
+port = 19930

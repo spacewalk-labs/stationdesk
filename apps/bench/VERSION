@@ -1,0 +1,10 @@
+# id version official-release-url sha256
+photocraft 0.15.1 https://github.com/storytold/photocraft/releases/download/v0.15.1/photocraft-web-0.15.1.zip 987251cb84c375130fa3624fa1e1dbbea24b062192121b594c9e538d05ea9109
+vectorcraft 0.16.0 https://github.com/storytold/vectorcraft/releases/download/v0.16.0/vectorcraft-web-0.16.0.zip 5041d69b82a6d7bc39527a15bc42ae8e3e19a92eb0b72efb112aa26aa25efc23
+designcraft 0.12.0 https://github.com/storytold/designcraft/releases/download/v0.12.0/designcraft-web-0.12.0.zip f50df7897c259b5a80f0f0aeecf80ac5abe4a21318568a077dae0822ef89c8d2
+pdfcraft 0.13.0 https://github.com/storytold/pdfcraft/releases/download/v0.13.0/pdfcraft-web-0.13.0.zip b16bb14222f371bc5c8da9dc2ee39c77c35f748ffd953d738e4cb3241287b3c8
+lightcraft 0.13.0 https://github.com/storytold/lightcraft/releases/download/v0.13.0/lightcraft-web-0.13.0.zip 80d8434f9917e7384e1241a7a2fa8f52b07f8c6006dab9c5ab6ace900128e92f
+filmcraft 0.12.0 https://github.com/storytold/filmcraft/releases/download/v0.12.0/filmcraft-web-0.12.0.zip c62658f33781767909e180b464c1875ccf41e18465de3cdd1acd135381b8be74
+effectcraft 0.16.0 https://github.com/storytold/effectcraft/releases/download/v0.16.0/effectcraft-web-0.16.0.zip b6d08ea9168dbca3257c4f68b658e1ec37e4a83718312e420c1cb99f38868a74
+figcraft 0.10.0 https://github.com/storytold/figcraft/releases/download/v0.10.0/figcraft-web-0.10.0.zip 852e6c7980602a5255d52250d587f7be62dc86738150b181fe20214055aec723
+soundcraft 0.12.1 https://github.com/storytold/soundcraft/releases/download/v0.12.1/soundcraft-web-0.12.1.zip e37f4d6643668a04f27f32c66353edab52edaaf982f61c89c674221ffa4189c9

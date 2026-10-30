@@ -1,0 +1,2358 @@
+<!doctype html>
+<html lang="en" data-theme="system">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>StationDesk</title>
+<script src="/assets/i18n.js"></script>
+<script>
+/* Match the live launcher's persisted choice before the page or browser chrome paints. */
+(function () {
+  var theme = "system";
+  try {
+    var stored = localStorage.getItem("stationdesk-theme");
+    if (stored === "light" || stored === "dark" || stored === "system") {
+      theme = stored;
+    }
+  } catch (_) {}
+  document.documentElement.setAttribute("data-theme", theme);
+  var light = theme === "light" ||
+    (theme === "system" && window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches);
+  var themeColor = document.createElement("meta");
+  themeColor.name = "theme-color";
+  themeColor.content = light ? "#F5F5F7" : "#1F2937";
+  document.head.appendChild(themeColor);
+})();
+</script>
+<link rel="stylesheet" href="/assets/stationdesk-tokens.css">
+<link rel="stylesheet" href="/assets/devmon-card-ui.css">
+<link rel="stylesheet" href="/assets/devmon-inbox.css">
+<script src="/assets/app-badges.js"></script>
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="StationDesk">
+<style>
+  /* Colour, type, spacing and radius all come from /assets/stationdesk-tokens.css.
+     There is no light/dark block here any more: the token sheet ships dark as
+     canonical and overrides it for light, so this file never states a value and
+     cannot drift from the rest of the system. */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--stationdesk-canvas); color: var(--stationdesk-ink);
+    font: 17px/1.5 -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: max(env(safe-area-inset-top), 1.5rem) 1.25rem 3rem;
+  }
+  header { max-width: var(--stationdesk-page); margin: 0 auto 2rem; display: flex; align-items: center; gap: 1rem;
+           flex-wrap: wrap; position: relative;   /* anchors the settings sheet */
+           padding-bottom: 0.9rem; border-bottom: 1px solid var(--stationdesk-hairline); }
+  h1 { font-size: 1.25rem; margin: 0; letter-spacing: -0.02em; font-weight: 700;
+       flex: 1; min-width: max-content; white-space: nowrap; }
+  .wordmark-i { position: relative; display: inline-block; }
+  .wordmark-i::before { content: ""; position: absolute; top: .11em; left: 50%; width: .17em; height: .17em; border-radius: 50%; background: #e4572e; transform: translateX(-50%); }
+  /* One appearance control that cycles Auto -> Light -> Dark. Three buttons said
+     the same three words the icon already says, and on a phone they were the
+     widest thing in the header. The name lives in the title, so the button itself
+     is only ever an icon. */
+  .theme-cycle {
+    width: 44px; height: 44px; padding: 0; display: grid; place-items: center;
+    border: 1px solid var(--stationdesk-hairline); border-radius: var(--stationdesk-r-pill);
+    background: transparent; color: var(--stationdesk-mute); cursor: pointer;
+  }
+  .theme-cycle:hover { color: var(--stationdesk-ink); background: var(--stationdesk-surface-1); }
+  .theme-cycle:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+  .theme-cycle svg { width: 20px; height: 20px; display: block; fill: none; stroke: currentColor;
+                     stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .who { display: flex; align-items: center; gap: 7px; color: var(--stationdesk-mute);
+         font-size: 0.9rem; font-weight: 500; white-space: nowrap; }
+  .who:empty { display: none; }
+  /* On a phone the address is the first thing to go: the pill keeps its initial,
+     which is still enough to say whose box this is. */
+  @media (max-width: 560px) { .who span { display: none; } }
+  .who i { display: grid; place-items: center; width: 30px; height: 30px; flex: none;
+           border-radius: 50%; background: var(--stationdesk-primary); color: var(--stationdesk-on-primary);
+           font-style: normal; font-weight: 700; font-size: 0.8rem; }
+  /* The pill is the entrance to subscription accounts (owner decision, confirmed
+     mockup 9: the settings sheet has no subscription row — this does, because the
+     pill is already the place that says whose box this is). [data-acct] is set by
+     script only once there is a panel to open, so an unwired pill keeps exactly
+     the plain-label look it has today. */
+  .who[data-acct] { cursor: pointer; color: var(--stationdesk-ink); }
+  .who[data-acct]:hover { background: var(--stationdesk-surface-1); }
+  .who[data-acct]:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+  /* Warning ring. The level comes from the platform account surface's /acct-alert
+     (hub prefix, same origin) — the same verdict
+     devterm's own account icon and the return widget's ring read, so all three
+     change colour at the same instant and no threshold is restated here. Amber
+     warns; red blinks, because a static ring on something you have learnt to
+     ignore has stopped being a warning. */
+  .who[data-acct-level="warn"] { border-color: var(--stationdesk-warning); color: var(--stationdesk-warning); }
+  .who[data-acct-level="crit"] { border-color: var(--stationdesk-danger); color: var(--stationdesk-danger);
+                                 animation: acct-ring-blink 1.4s steps(1, end) infinite; }
+  @keyframes acct-ring-blink { 50% { border-color: var(--stationdesk-hairline); } }
+  @media (prefers-reduced-motion: reduce) {
+    .who[data-acct-level="crit"] { animation: none; }
+  }
+
+  /* Subscription panel, opened from the pill. The panel is the platform asset at
+     hub/assets/accounts/ — the same file devterm's account icon and the return
+     widget's menu open, so there is one implementation with three hosts. It has to
+     be an iframe on devterm's origin rather than a copy here: every fetch inside it
+     is a root-absolute path that only that gate answers. This is just the modal
+     around it, in the hub's own tokens. */
+  .acct-modal { position: fixed; inset: 0; z-index: 60; display: flex;
+                align-items: center; justify-content: center;
+                padding: var(--stationdesk-sp-4); background: rgba(0, 0, 0, .6); }
+  .acct-box { display: flex; flex-direction: column; overflow: hidden;
+              width: min(460px, 100%); height: min(620px, 92vh);
+              border: 1px solid var(--stationdesk-hairline); border-radius: var(--stationdesk-r-lg);
+              background: var(--stationdesk-surface-1); box-shadow: var(--stationdesk-shadow-hover); }
+  .acct-head { flex: 0 0 auto; display: flex; align-items: center; gap: var(--stationdesk-sp-3);
+               padding: var(--stationdesk-sp-3) var(--stationdesk-sp-4);
+               border-bottom: 1px solid var(--stationdesk-hairline);
+               font-size: 0.95rem; font-weight: var(--stationdesk-fw-semibold); }
+  .acct-ttl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acct-x { flex: none; width: 34px; height: 30px; border: 0; cursor: pointer;
+            border-radius: var(--stationdesk-r-sm); background: var(--stationdesk-surface-2);
+            color: var(--stationdesk-ink); font: inherit; font-size: 1rem; line-height: 1; }
+  .acct-x:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+  .acct-frame { flex: 1 1 auto; width: 100%; border: 0; background: var(--stationdesk-surface-1); }
+  .acct-note { padding: var(--stationdesk-sp-4); color: var(--stationdesk-body);
+               font-size: 0.85rem; line-height: 1.55; word-break: break-word; }
+  main { max-width: var(--stationdesk-page); margin: 0 auto; }
+  /* ── the named line ────────────────────────────────────────────────────
+     The one divider on the home screen, and the owner names it. It spans the
+     full column so it reads as a rule through the list rather than another
+     tile, and the green is the only non-token colour in this file — a line you
+     named is not a category, so it must not borrow the app palette. */
+  /* justify-self, not just grid-column: the grid centres its items, so a line
+     would otherwise shrink to the width of its own name — and an unnamed line to
+     almost nothing. A rule you drew is a rule through the list. */
+  .home-line { grid-column: 1 / -1; justify-self: stretch; margin: 10px 0 2px; }
+  .home-line hr { border: 0; border-top: 2px solid var(--stationdesk-line);
+                  margin: 0 0 6px; }
+  .home-line-label { display: flex; align-items: center; gap: 8px; min-height: 20px;
+                     color: var(--stationdesk-mute); font-size: 0.78rem; }
+  .home-line-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .home-line input { display: none; flex: 1; min-width: 0; max-width: 22rem;
+                     padding: 3px 9px; border: 1px solid var(--stationdesk-hairline);
+                     border-radius: var(--stationdesk-r-sm); background: var(--stationdesk-surface-1);
+                     color: var(--stationdesk-ink); font: inherit; font-size: 0.82rem; }
+  .home-line-drop { display: none; flex: none; width: 26px; height: 26px; padding: 0;
+                    border: 0; border-radius: var(--stationdesk-r-pill);
+                    background: var(--stationdesk-surface-2); color: var(--stationdesk-mute);
+                    font: inherit; font-size: 1rem; line-height: 1; cursor: pointer; }
+  :root[data-home-edit="1"] .home-line-name { display: none; }
+  :root[data-home-edit="1"] .home-line input { display: block; }
+  :root[data-home-edit="1"] .home-line-drop { display: block; }
+  /* The only control the edit mode adds, and it is what a person reaches for
+     when the list is finished: one more divider. It disappears at the cap
+     rather than disabling itself, so the header cannot grow a dead control. */
+  .home-editbar {
+    position: fixed; z-index: 30; left: 50%; bottom: max(env(safe-area-inset-bottom), 18px);
+    display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 14px;
+    border: 1px solid var(--stationdesk-hairline); border-radius: var(--stationdesk-r-pill);
+    background: var(--stationdesk-surface-1); box-shadow: var(--stationdesk-shadow-hover);
+    color: var(--stationdesk-mute); font-size: 0.82rem; white-space: nowrap;
+    transform: translateX(-50%) translateY(180%);
+    visibility: hidden; transition: transform .18s ease-out, visibility 0s .18s;
+  }
+  :root[data-home-edit="1"] .home-editbar {
+    transform: translateX(-50%) translateY(0);
+    visibility: visible; transition: transform .18s ease-out;
+  }
+  .home-addline, .home-done { flex: none; min-height: 36px; padding: 0 14px; border: 0;
+                  border-radius: var(--stationdesk-r-pill); background: var(--stationdesk-surface-2);
+                  color: var(--stationdesk-ink); font: inherit; font-size: 0.82rem;
+                  font-weight: var(--stationdesk-fw-semibold); cursor: pointer; }
+  .home-addline[hidden] { display: none; }
+
+  /* launcher grid — category-coloured tiles + shared glyph sprite */
+  /* Column count is not pinned; the tile size sets it and auto-fill does the rest
+     (owner, 2026-09-05: "타일을 키우고 자동으로"). Growing the tile is what thins
+     the row out — at the old 92px minimum an 880px column packed eight 82px tiles
+     into 99.5px cells, which read as a list rather than a home screen. */
+  .apps { position: relative; display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+          gap: 30px 18px; justify-items: center; }
+  .app { display: flex; flex-direction: column; align-items: center; gap: 11px; width: 108px;
+         text-decoration: none; color: var(--stationdesk-ink); position: relative; }
+  .app[hidden] { display: none; }
+  .app-unread { position: absolute; top: -6px; right: 8px; z-index: 1;
+    min-width: 24px; height: 24px; padding: 0 5px; box-sizing: border-box;
+    border-radius: 12px; background: var(--stationdesk-danger); color: var(--stationdesk-on-primary);
+    display: grid; place-items: center; font-size: 12px; font-weight: 700;
+    border: 2px solid var(--stationdesk-canvas); }
+  .app-unread[hidden] { display: none; }
+  .app .ic {
+    /* px literals on purpose. bin/gen-app-icons.py reads this rule's width,
+       border-radius and the glyph width below to build every app icon from the
+       launcher's own geometry, so it needs numbers it can parse — a var() here
+       leaves the generator guessing and its guard fails closed.
+       80/20/48 keeps the ratios the 60/15/36 tile had exactly (radius 1:4,
+       glyph 3:5), so growing the tile does not silently redraw the icons. */
+    width: 80px; height: 80px; border-radius: 20px; display: grid; place-items: center;
+    overflow: hidden; position: relative;
+    color: var(--app-glyph, var(--stationdesk-primary));
+    background: var(--app-tile, var(--stationdesk-surface-2));
+    box-shadow: var(--stationdesk-shadow);
+    transition: transform .16s cubic-bezier(.2,.8,.2,1), box-shadow .16s;
+  }
+  /* iOS-style glass edge: bright top-left / soft bottom-right corner rims */
+  .app .ic::after {
+    content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+    background:
+      radial-gradient(145% 145% at 0% 0%, rgba(255,255,255,.32), rgba(255,255,255,0) 20%),
+      radial-gradient(145% 145% at 100% 100%, rgba(255,255,255,.18), rgba(255,255,255,0) 22%),
+      linear-gradient(180deg, rgba(255,255,255,.05) 0%, rgba(255,255,255,0) 48%, rgba(0,0,0,.05) 100%);
+  }
+  .app:hover .ic { transform: translateY(-3px); box-shadow: var(--stationdesk-shadow-hover); }
+  .app .ic svg { width: 48px; height: 48px; display: block; }
+  .app .ic svg, .app .ic svg * { color: var(--app-glyph, var(--stationdesk-primary)); }
+  /* real brand icon (orca, paseo): full-bleed image, no category tile behind it */
+  .app .ic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .app.has-brand .ic { background: none; box-shadow: var(--stationdesk-shadow); }
+  .app .lb { font-size: 0.85rem; font-weight: 500; text-align: center; line-height: 1.25; }
+  /* The manifest description remains in each tile's DOM, but an iPhone-style
+     home screen leads with the icon and name alone. Setting the root attribute
+     to `data-tile-descriptions="visible"` is the single opt-in for a future
+     preference or long-press reveal. */
+  .app .sub { display: none; color: var(--stationdesk-mute); font-size: 0.72rem;
+              text-align: center; line-height: 1.35; }
+  :root[data-tile-descriptions="visible"] .app .sub { display: block; max-width: 18ch; }
+  /* Home-order editing: long press, drag, tap the empty space to stop. In the
+     same mode every tile the owner can delete wears a × at its top-left corner,
+     as on an iPad; pressing it asks first (the .home-alert below). */
+  :root[data-home-order-owner="1"] .app { -webkit-touch-callout: none;
+    -webkit-user-select: none; user-select: none; -webkit-user-drag: none; }
+  /* touch-action is fixed at pointerdown, so the long press has to lift it before
+     the finger can move: without this the first drag of the gesture is a scroll. */
+  :root[data-home-edit="1"] .app { cursor: grab; touch-action: none; -webkit-user-drag: none; }
+  /* On .ic, never on .app: the FLIP slide animates the tile's own transform, and
+     an animation on the same element overwrites it — every non-dragged icon froze
+     mid-move while one tile was being dragged. */
+  :root[data-home-edit="1"] .app .ic { animation: home-icon-wiggle .28s ease-in-out infinite alternate; }
+  :root[data-home-edit="1"] .app:nth-child(2n) .ic { animation-direction: alternate-reverse; }
+  :root[data-home-edit="1"] .app:hover .ic { transform: none; }
+  /* Pinned to the icon's own corner: the tile is wider than its icon, so the
+     offset is half the icon from the tile's centre line. */
+  .app-remove {
+    display: none; position: absolute; z-index: 3; top: -9px; left: calc(50% - 49px);
+    width: 26px; height: 26px; padding: 0; border: 0; border-radius: 50%;
+    background: rgba(118, 118, 128, .62); color: #fff;
+    -webkit-backdrop-filter: blur(12px) saturate(1.6); backdrop-filter: blur(12px) saturate(1.6);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .22); cursor: pointer;
+    place-items: center; touch-action: manipulation;
+    animation: home-remove-in .18s cubic-bezier(.2,.9,.3,1.25);
+  }
+  .app-remove svg { width: 12px; height: 12px; stroke: currentColor; stroke-width: 2.6;
+    stroke-linecap: round; fill: none; display: block; }
+  .app-remove::before { content: ""; position: absolute; inset: -8px; }
+  :root[data-home-edit="1"] .app .app-remove { display: grid; }
+  .app-remove:active { transform: scale(.9); }
+  .app-remove:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+  @keyframes home-remove-in { from { transform: scale(0); } to { transform: scale(1); } }
+  /* A tile whose deletion is running: still, faded, and not something to press again. */
+  .app.home-removing { pointer-events: none; }
+  .app.home-removing .ic { animation: none !important; opacity: .38; filter: saturate(.2); }
+  .app.home-removing .lb { opacity: .5; }
+  :root[data-home-edit="1"] .app.home-removing .app-remove { display: none; }
+  .app.home-dragging { opacity: 0; pointer-events: none; }
+  .app.home-pressing .ic { filter: brightness(.94); }
+  .app.home-drag-ghost { position: fixed; z-index: 20; margin: 0; pointer-events: none;
+    transition: transform .18s cubic-bezier(.2,.8,.2,1); will-change: transform; }
+  .app.home-drag-ghost .ic { animation: none !important;
+    box-shadow: 0 15px 24px rgba(0,0,0,.22), 0 3px 8px rgba(0,0,0,.12); }
+  .home-drag-ghost .lb, .home-drag-ghost .sub,
+  .home-drag-ghost .app-remove { visibility: hidden; }
+  @media (prefers-reduced-motion: reduce) {
+    :root[data-home-edit="1"] .app .ic { animation: none; }
+    .app.home-drag-ghost { transition: none; }
+    .app-remove, .home-alert[open] { animation: none; }
+  }
+  @keyframes home-icon-wiggle { from { transform: rotate(-1.1deg); } to { transform: rotate(1.1deg); } }
+
+  /* The one question the home screen asks: an iOS alert. Frosted, centred,
+     a bold title and a quiet reason, then full-width buttons separated by
+     hairlines — the destructive one red, Cancel last and bold. */
+  .home-alert {
+    width: 270px; max-width: calc(100vw - 48px); padding: 0; margin: auto;
+    border: 0; border-radius: 14px; overflow: hidden; text-align: center;
+    color: var(--stationdesk-ink);
+    background: color-mix(in srgb, var(--stationdesk-surface-1) 80%, transparent);
+    -webkit-backdrop-filter: blur(28px) saturate(1.8); backdrop-filter: blur(28px) saturate(1.8);
+    box-shadow: 0 0 0 .5px var(--stationdesk-edge), 0 24px 60px rgba(0, 0, 0, .32);
+  }
+  .home-alert::backdrop { background: rgba(0, 0, 0, .32); }
+  .home-alert[open] { animation: home-alert-in .24s cubic-bezier(.2,.9,.3,1.1); }
+  @keyframes home-alert-in { from { opacity: 0; transform: scale(1.14); } to { opacity: 1; transform: none; } }
+  .home-alert-body { padding: 20px 16px 19px; word-break: keep-all; }
+  .home-alert-icon { width: 54px; height: 54px; margin: 0 auto 12px; border-radius: 13px;
+    display: grid; place-items: center; overflow: hidden;
+    color: var(--app-glyph, var(--stationdesk-primary)); background: var(--app-tile, var(--stationdesk-surface-2)); }
+  .home-alert-icon:empty { display: none; }
+  .home-alert-icon svg { width: 32px; height: 32px; }
+  .home-alert-icon img { width: 100%; height: 100%; object-fit: cover; }
+  .home-alert-icon.has-brand { background: none; }
+  .home-alert h2 { margin: 0; font-size: 17px; font-weight: var(--stationdesk-fw-semibold);
+    line-height: 1.3; letter-spacing: -.01em; overflow-wrap: break-word; }
+  .home-alert p { margin: 6px 0 0; font-size: 13px; line-height: 1.4; color: var(--stationdesk-body); }
+  .home-alert p:empty { display: none; }
+  .home-alert-actions { display: flex; flex-direction: column; }
+  .home-alert-actions button {
+    min-height: 44px; padding: 0 16px; border: 0; border-top: .5px solid var(--stationdesk-hairline);
+    background: none; color: var(--stationdesk-primary); font: inherit; font-size: 17px;
+    letter-spacing: -.01em; cursor: pointer;
+  }
+  .home-alert-actions button:hover { background: color-mix(in srgb, var(--stationdesk-ink) 5%, transparent); }
+  .home-alert-actions button:active { background: color-mix(in srgb, var(--stationdesk-ink) 11%, transparent); }
+  .home-alert-actions button:focus-visible { outline: none; background: color-mix(in srgb, var(--stationdesk-primary) 14%, transparent); }
+  .home-alert-actions button[data-role="destructive"] { color: var(--stationdesk-danger); }
+  .home-alert-actions button[data-role="cancel"] { font-weight: var(--stationdesk-fw-semibold); }
+
+  /* Keep the home-screen density on phones: three icons, not two explanatory
+     cards. The 82px tile is still wider and taller than the 44px touch target.
+
+     The touch tests are BOUNDED BY WIDTH, and that bound is the point. `hover: none`
+     and `pointer: coarse` describe the input, not the screen — an iPad in landscape
+     answers to both and is 1366px wide, so the unbounded version handed a tablet the
+     phone layout: three tiles stretched across the 880px column with the rest of the
+     row empty. Measured on a real iPad, 2026-09-05, and reported as "화면이 넓은데
+     3개만 나오니까 어색한데?".
+
+     This is the second time a coarse-pointer test has been too broad here (the first
+     was the iPad + button, 2026-09-02). The lesson both times: ask the media query
+     what it actually means. "Is this a phone" is a question about width; only "is
+     this a finger" is a question about the pointer.
+
+     960px sits between the widest phone landscape (932px) and the narrowest tablet
+     portrait (1024px), so phones keep the dense layout in both orientations and
+     tablets fall through to the auto-fill grid above — the same one desktops get. */
+  @media (max-width: 560px),
+         (hover: none) and (max-width: 960px),
+         (pointer: coarse) and (max-width: 960px) {
+    /* A phone still needs a floor. The 124px minimum above would give a 350px
+       phone column TWO tiles, so this is not the old hard cap returning — it is
+       the one width where auto-fill cannot reach a sensible answer. Four, like
+       an iPhone home screen. */
+    .apps { grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 24px 8px; align-items: start; }
+    .app { width: 100%; }
+    .app .ic { width: 60px; height: 60px; border-radius: 15px; }
+    .app .ic svg { width: 36px; height: 36px; }
+    .app-remove { top: -8px; left: calc(50% - 39px); width: 24px; height: 24px; }
+  }
+
+  /* Tile colour is the app's, not the system's.
+     Every other colour on this page is a token, and this block is the one
+     deliberate exception. It follows the iOS rule rather than ours: the system
+     owns the geometry — the squircle, the 60px, the shadow, the glass edge —
+     and the app owns its hue. A launcher whose tiles are all one colour is
+     tidier and worse; you find an app on a home screen by its colour before
+     you have read a single label.
+     So these are raw hex on purpose. They are DATA about each tool, not part
+     of the palette, and folding them into --stationdesk-* would make the design
+     system claim authorship of a decision it does not own. Today the value is
+     keyed off data-cat; per-app colour in stationdesk-app.toml is the next step,
+     and this rule is the fallback for an app that does not declare one.
+     coding=dark+green · docs=blue · files=teal · system=slate · comms=green */
+  .app[data-cat="coding"] { --app-tile: #16181f; --app-glyph: #6aac32; }
+  .app[data-cat="docs"]   { --app-tile: #2f5aa8; --app-glyph: #ffffff; }
+  .app[data-cat="files"]  { --app-tile: #128a86; --app-glyph: #ffffff; }
+  .app[data-cat="system"] { --app-tile: #46597e; --app-glyph: #ffffff; }
+  .app[data-cat="comms"]  { --app-tile: #3f9a5c; --app-glyph: #ffffff; }
+
+  .find-open, .find-close {
+    width: 44px; height: 44px; padding: 0; display: grid; place-items: center;
+    border: 1px solid var(--stationdesk-hairline); border-radius: 999px;
+    background: transparent; color: var(--stationdesk-mute); cursor: pointer;
+  }
+  .find-open { margin-left: auto; }
+  .find-open:hover, .find-close:hover { color: var(--stationdesk-ink); background: var(--stationdesk-surface-1); }
+  .find-open:focus-visible, .find-close:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+  .find-open svg, .find-close svg { width: 18px; height: 18px; fill: none; stroke: currentColor;
+                                     stroke-width: 1.8; stroke-linecap: round; }
+  .launcher-find { margin: 0 0 2rem; display: flex; align-items: center; gap: 8px; }
+  .launcher-find[hidden] { display: none; }
+  .launcher-find input {
+    width: min(100%, 28rem); flex: 1; min-height: 44px; padding: 9px 14px;
+    border: 1px solid var(--stationdesk-hairline); border-radius: 12px;
+    background: var(--stationdesk-surface-1); color: var(--stationdesk-ink);
+    font: inherit; font-size: 0.95rem; -webkit-appearance: none;
+  }
+  .launcher-find input:focus { outline: none; border-color: var(--stationdesk-primary); }
+  .empty { color: var(--stationdesk-mute); }
+
+  .msgstrip { max-width: var(--stationdesk-page); margin: 0 auto 1.75rem; }
+
+  /* Owner tools share one header control grammar. Updates belong to the app-store
+     entrance; the gear is now only agent and harness settings. */
+  .gear, .store-open {
+    position: relative; width: 44px; height: 44px; padding: 0; display: grid; place-items: center;
+    border: 1px solid var(--stationdesk-hairline); border-radius: var(--stationdesk-r-pill);
+    background: transparent; color: var(--stationdesk-mute); cursor: pointer;
+  }
+  .gear[hidden], .store-open[hidden] { display: none; }
+  .gear:hover, .store-open:hover { color: var(--stationdesk-ink); background: var(--stationdesk-surface-1); }
+  .gear:focus-visible, .store-open:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+  .gear[aria-expanded="true"], .store-open[aria-expanded="true"] { color: var(--stationdesk-ink); border-color: var(--stationdesk-primary); }
+  .gear svg, .store-open svg { width: 20px; height: 20px; display: block; fill: none; stroke: currentColor;
+              stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  /* Hidden at zero rather than drawn as "0": a zero is a number a reader stops
+     to parse, and no badge is the fastest way to say there is nothing to do. */
+  .store-badge {
+    position: absolute; top: 0; right: 0; min-width: 18px; height: 18px; padding: 0 5px;
+    display: grid; place-items: center; border-radius: var(--stationdesk-r-pill);
+    background: var(--stationdesk-primary); color: var(--stationdesk-on-primary);
+    font-size: 0.68rem; font-weight: var(--stationdesk-fw-bold); line-height: 1;
+  }
+  .store-badge[hidden] { display: none; }
+
+  .settings {
+    position: absolute; top: calc(100% + 8px); right: 0; z-index: 20;
+    width: min(480px, calc(100vw - 2.5rem)); max-height: min(78vh, 780px); overflow-y: auto;
+    padding: var(--stationdesk-sp-5); border: 1px solid var(--stationdesk-hairline);
+    border-radius: var(--stationdesk-r-lg); background: var(--stationdesk-surface-1);
+    box-shadow: var(--stationdesk-shadow-hover);
+  }
+  .settings[hidden] { display: none; }
+  .set-ttl { font-size: var(--stationdesk-fs-lg); font-weight: var(--stationdesk-fw-bold);
+             letter-spacing: var(--stationdesk-track); }
+  .set-sub { color: var(--stationdesk-mute); font-size: 0.82rem; margin-top: 2px; }
+  .set-sec { margin-top: var(--stationdesk-sp-6); }
+  .set-h { display: flex; align-items: center; gap: var(--stationdesk-sp-2);
+           font-size: 0.82rem; font-weight: var(--stationdesk-fw-semibold); color: var(--stationdesk-body);
+           padding-bottom: var(--stationdesk-sp-2); border-bottom: 1px solid var(--stationdesk-hairline); }
+  .set-row { display: flex; align-items: flex-start; gap: var(--stationdesk-sp-4);
+             padding: var(--stationdesk-sp-4) 0; border-bottom: 1px solid var(--stationdesk-hairline); }
+  .set-row:last-child { border-bottom: 0; }
+  .set-txt { flex: 1; min-width: 0; }
+  .set-name { font-size: 0.95rem; font-weight: var(--stationdesk-fw-semibold); }
+  .set-note { color: var(--stationdesk-mute); font-size: 0.82rem; line-height: 1.45; margin-top: 3px; }
+  .set-quiet { color: var(--stationdesk-mute); font-size: 0.85rem; padding: var(--stationdesk-sp-4) 0; }
+  .set-foot { color: var(--stationdesk-mute); font-size: 0.76rem; line-height: 1.5;
+              margin: var(--stationdesk-sp-5) 0 0; padding-top: var(--stationdesk-sp-4);
+              border-top: 1px solid var(--stationdesk-hairline); }
+
+  /* Button grammar, fixed by the confirmed mockup and worth stating once:
+     a FILLED button runs something in one click; an OUTLINED button only shows
+     you something; a YELLOW CHIP means a person has to decide, and the row
+     deliberately carries no filled button beside it. An external package whose
+     source digest moved is the whole reason the third case exists. */
+  .set-go, .set-see {
+    flex: none; min-height: 34px; padding: 0 var(--stationdesk-sp-4);
+    border-radius: var(--stationdesk-r-pill); font: inherit; font-size: 0.82rem;
+    font-weight: var(--stationdesk-fw-semibold); cursor: pointer;
+  }
+  .set-go  { border: 0; background: var(--stationdesk-primary); color: var(--stationdesk-on-primary); }
+  .set-see { border: 1px solid var(--stationdesk-hairline); background: transparent; color: var(--stationdesk-ink); }
+  a.set-see { display:inline-flex; align-items:center; text-decoration:none; }
+  .set-go:focus-visible, .set-see:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+  .set-go:disabled, .set-see:disabled { opacity: .55; cursor: default; }
+  .set-chip { display: inline-block; margin-top: var(--stationdesk-sp-2); padding: 3px 9px;
+              border: 1px solid var(--stationdesk-warning); border-radius: var(--stationdesk-r-pill);
+              color: var(--stationdesk-warning); font-size: 0.74rem;
+              font-weight: var(--stationdesk-fw-medium); }
+  /* A run line may live inside a lifecycle surface because that surface's own
+     connection can die mid-update (the installer
+     reloads nginx and restarts dev-monitor), so this reads a record on disk and
+     not a live request — see the poller. */
+  .set-run { margin-top: var(--stationdesk-sp-3); font-size: 0.82rem;
+             line-height: var(--stationdesk-lh); color: var(--stationdesk-mute); }
+  .set-run[hidden] { display: none; }
+  /* A revealed detail line: the checker's own output, indented under its row. */
+  .set-detail { margin-top: var(--stationdesk-sp-2); overflow-wrap: anywhere; }
+  .set-detail[hidden] { display: none; }
+  .set-run-head { color: var(--stationdesk-ink); font-weight: var(--stationdesk-fw-medium); }
+  .set-run-bad .set-run-head { color: var(--stationdesk-danger); }
+  .set-opts { display: flex; flex-wrap: wrap; align-items: center;
+              gap: var(--stationdesk-sp-2) var(--stationdesk-sp-5); margin-top: var(--stationdesk-sp-3); }
+  .set-opts label { display: inline-flex; align-items: center; gap: var(--stationdesk-sp-2);
+                    font-size: 0.88rem; }
+  .set-opts input { accent-color: var(--stationdesk-primary); width: 16px; height: 16px; margin: 0; }
+  .set-opts input:disabled + span { color: var(--stationdesk-mute); }
+
+  /* The sheet is a dropdown on a desktop and a sheet on a phone: at 480px the
+     header is narrower than the panel wants to be, so it stops being anchored
+     to the gear and spans the screen instead. */
+  @media (max-width: 560px) {
+    .settings { position: fixed; top: auto; right: 0; left: 0; bottom: 0;
+                width: 100%; max-height: 82vh;
+                border-radius: var(--stationdesk-r-lg) var(--stationdesk-r-lg) 0 0;
+                padding-bottom: max(env(safe-area-inset-bottom), var(--stationdesk-sp-5)); }
+  }
+
+  /* App store: a modal sheet above the launcher on wide screens, and a bottom
+     sheet on phones. The tabs stay fixed while each catalogue lands. */
+  .store-modal { position: fixed; inset: 0; z-index: 55; display: flex;
+                 align-items: center; justify-content: center; padding: var(--stationdesk-sp-4);
+                 background: rgba(0, 0, 0, .58); backdrop-filter: blur(3px); }
+  .store-modal[hidden] { display: none; }
+  .store-sheet { width: min(680px, 100%); max-height: min(780px, 92vh); overflow: hidden;
+                 display: flex; flex-direction: column; border: 1px solid var(--stationdesk-hairline);
+                 border-radius: var(--stationdesk-r-lg); background: var(--stationdesk-surface-1);
+                 box-shadow: var(--stationdesk-shadow-hover); }
+  .store-head { flex: none; display: flex; align-items: center; gap: var(--stationdesk-sp-3);
+                padding: var(--stationdesk-sp-4) var(--stationdesk-sp-5);
+                border-bottom: 1px solid var(--stationdesk-hairline); }
+  .store-title { flex: 1; font-size: var(--stationdesk-fs-lg); font-weight: var(--stationdesk-fw-bold); }
+  .store-close { width: 36px; height: 36px; padding: 0; border: 0;
+                border-radius: var(--stationdesk-r-pill); background: var(--stationdesk-surface-2);
+                color: var(--stationdesk-ink); font: inherit; cursor: pointer; }
+  .store-close:focus-visible, .store-tab:focus-visible,
+  .store-action:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+  .store-tabs { flex: none; display: flex; gap: var(--stationdesk-sp-1); overflow-x: auto;
+                padding: var(--stationdesk-sp-2) var(--stationdesk-sp-4) 0;
+                border-bottom: 1px solid var(--stationdesk-hairline); }
+  .store-tab { flex: none; border: 0; border-bottom: 2px solid transparent;
+               padding: var(--stationdesk-sp-2) var(--stationdesk-sp-3) var(--stationdesk-sp-3);
+               background: transparent; color: var(--stationdesk-mute); font: inherit;
+               font-size: .84rem; font-weight: var(--stationdesk-fw-semibold); cursor: pointer; }
+  .store-tab[aria-selected="true"] { border-bottom-color: var(--stationdesk-primary); color: var(--stationdesk-ink); }
+  .store-tab-count { margin-left: 3px; padding: 1px 6px; border-radius: var(--stationdesk-r-pill);
+                     background: var(--stationdesk-surface-2); font-size: .7rem; }
+  .store-body { min-height: 250px; overflow-y: auto; padding: var(--stationdesk-sp-3) var(--stationdesk-sp-5) var(--stationdesk-sp-5); }
+  .store-pane[hidden], .store-tab[hidden] { display: none; }
+  .store-row { position: relative; display: flex; align-items: center; gap: var(--stationdesk-sp-4);
+               padding: var(--stationdesk-sp-3) var(--stationdesk-sp-2);
+               border-bottom: 1px solid var(--stationdesk-hairline); border-radius: var(--stationdesk-r-sm); }
+  .store-row:last-child { border-bottom: 0; }
+  /* 36px, the same geometry the launcher tile uses at its smallest, so the two
+     surfaces show an app at a size a person already recognises. */
+  .store-row-icon { flex: none; width: 36px; height: 36px; border-radius: 9px;
+                    display: grid; place-items: center; overflow: hidden;
+                    background: var(--stationdesk-surface-2); color: var(--stationdesk-mute); }
+  .store-row-icon svg { width: 22px; height: 22px; display: block; }
+  .store-row.has-brand .store-row-icon { background: none; }
+  .store-row-icon img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .store-row-text { flex: 1; min-width: 0; }
+  .store-row-name { font-size: .95rem; font-weight: var(--stationdesk-fw-semibold); }
+  /* Exactly one line. A second line turns a three-word row into a paragraph, and
+     the detail box below is where the long version belongs. */
+  .store-row-note { margin-top: 2px; color: var(--stationdesk-mute); font-size: .78rem;
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .store-run-note { margin-top: 6px; font-size: .78rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .store-row-source { margin-top: 2px; color: var(--stationdesk-mute);
+                      font-family: var(--stationdesk-font-mono); font-size: .72rem;
+                      overflow-wrap: anywhere; }
+  .store-actions { flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--stationdesk-sp-2); }
+  .store-action { min-height: 34px; padding: 0 var(--stationdesk-sp-4); border-radius: var(--stationdesk-r-pill);
+                  border: 1px solid var(--stationdesk-hairline); background: transparent;
+                  color: var(--stationdesk-ink); font: inherit; font-size: .8rem;
+                  font-weight: var(--stationdesk-fw-semibold); cursor: pointer; }
+  .store-action-primary { border-color: transparent; background: var(--stationdesk-primary); color: var(--stationdesk-on-primary); }
+  .store-action-danger { border-color: var(--stationdesk-danger); color: var(--stationdesk-danger); }
+  .store-action:disabled { opacity: .45; cursor: default; }
+  /* Where a row's origin, digest and path live. Off the row until it is asked
+     for — hover on a pointer, a tap on a finger — because the row's own job is
+     name, one line, and a state you can press. */
+  .store-detail-pop { display: none; position: absolute; z-index: 5; left: 56px;
+                      top: calc(100% - 6px); min-width: 240px; max-width: 340px;
+                      padding: var(--stationdesk-sp-3) var(--stationdesk-sp-4);
+                      border: 1px solid var(--stationdesk-hairline);
+                      border-radius: var(--stationdesk-r-sm); background: var(--stationdesk-canvas);
+                      box-shadow: var(--stationdesk-shadow-hover); font-size: .75rem; }
+  .store-row.pinned .store-detail-pop { display: block; }
+  .store-detail-pop dl { display: grid; grid-template-columns: auto 1fr; gap: 3px var(--stationdesk-sp-3);
+                         margin: 0; }
+  .store-detail-pop dt { color: var(--stationdesk-mute); }
+  .store-detail-pop dd { margin: 0; overflow-wrap: anywhere;
+                         font-family: var(--stationdesk-font-mono); }
+  .store-add-form { display: grid; gap: var(--stationdesk-sp-3); padding: var(--stationdesk-sp-4);
+                          margin-top: var(--stationdesk-sp-4);
+                         border: 1px solid var(--stationdesk-hairline); border-radius: var(--stationdesk-r-sm);
+                         background: var(--stationdesk-surface-2); }
+  .store-add-form label { font-size: .82rem; font-weight: var(--stationdesk-fw-semibold); }
+  .store-add-form input { width: 100%; min-height: 44px; padding: 9px 12px;
+                               border: 1px solid var(--stationdesk-hairline); border-radius: var(--stationdesk-r-sm);
+                               background: var(--stationdesk-surface-1); color: var(--stationdesk-ink);
+                               font: .82rem/1.4 var(--stationdesk-font-mono); }
+  .store-add-form input:focus { outline: none; box-shadow: var(--stationdesk-focus); }
+  .store-add-hint { color: var(--stationdesk-mute); font-size: .76rem; }
+  .store-add-submit { justify-self: start; min-height: 40px; }
+  .store-empty { padding: var(--stationdesk-sp-6) 0; color: var(--stationdesk-mute); font-size: .86rem; }
+  .store-alert { margin-bottom: var(--stationdesk-sp-3); padding: var(--stationdesk-sp-3);
+                 border: 1px solid var(--stationdesk-danger); border-radius: var(--stationdesk-r-sm);
+                 color: var(--stationdesk-danger); font-size: .82rem; }
+  .store-progress-note { color: var(--stationdesk-mute); font-size: .78rem; }
+  @media (max-width: 560px) {
+    .store-modal { align-items: flex-end; padding: 0; }
+    .store-sheet { width: 100%; max-height: 88vh; border-radius: var(--stationdesk-r-lg) var(--stationdesk-r-lg) 0 0;
+                   padding-bottom: env(safe-area-inset-bottom); }
+    .store-body { padding-right: var(--stationdesk-sp-4); padding-left: var(--stationdesk-sp-4); }
+    .store-row { align-items: flex-start; }
+    .store-actions { flex-direction: column; }
+  }
+
+  /* A tile whose app has an update carries the same dot the app-store badge counts,
+     so the launcher answers "which one?" without opening the panel. Hung off
+     .app (already position: relative) and not off .app .ic, whose width and
+     radius bin/gen-app-icons.py reads out of this file expecting exactly one
+     declaration each — and which clips its children anyway (overflow: hidden).
+     Centred-relative, so it lands on the icon's corner in both the 82px
+     desktop tile and the full-width phone column. */
+  .app .dot {
+    position: absolute; top: -3px; left: calc(50% + 19px); width: 12px; height: 12px;
+    border-radius: 50%; background: var(--stationdesk-primary);
+    box-shadow: 0 0 0 2px var(--stationdesk-canvas);
+  }
+
+  /* suggestion box — a same-origin feedback relay (see apps/feedback).
+     Collapsed by default: the launcher stays quiet and only a small trigger
+     shows. The panel below is revealed on click. */
+  .feedback { max-width: var(--stationdesk-page); margin: 2.75rem auto 0; }
+  .fb-open {
+    border: 1px solid var(--stationdesk-hairline); border-radius: 999px; padding: 5px 14px; cursor: pointer;
+    background: transparent; color: var(--stationdesk-mute); font: inherit; font-size: 0.8rem; font-weight: 500;
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .fb-open:hover { color: var(--stationdesk-ink); border-color: var(--stationdesk-mute); background: var(--stationdesk-surface-1); }
+  .fb-panel { position: relative; }        /* anchors the dismiss button */
+  .fb-panel[hidden] { display: none; }
+  .fb-panel .set-h { margin-bottom: 0.75rem; padding-right: 2.75rem; }
+  .feedback textarea {
+    width: 100%; min-height: 84px; resize: vertical; box-sizing: border-box;
+    padding: 12px 14px; border: 1px solid var(--stationdesk-hairline); border-radius: 12px;
+    background: var(--stationdesk-surface-1); color: var(--stationdesk-ink); font: inherit;
+    -webkit-appearance: none;   /* iOS draws an inset shadow otherwise */
+  }
+  .feedback textarea:focus { outline: none; border-color: var(--stationdesk-primary); }
+  .fb-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  /* Sized against the section headers, not the 17px body text: this is a small
+     utility control at the foot of the page, not a page-level call to action. */
+  .fb-send {
+    border: 0; border-radius: 999px; padding: 5px 14px; cursor: pointer;
+    background: var(--stationdesk-primary); color: var(--stationdesk-on-primary); font: inherit; font-size: 0.8rem; font-weight: 600;
+  }
+  .fb-send:disabled { opacity: .55; cursor: default; }
+  /* Dismiss sits at the panel's top-right, away from Send: it is an escape
+     hatch, not a sibling of the primary action. Icon-only, but a 36px target. */
+  .fb-close {
+    position: absolute; top: -7px; right: 0; width: 36px; height: 36px; padding: 0;
+    display: grid; place-items: center; border: 0; border-radius: 999px;
+    background: none; color: var(--stationdesk-mute); cursor: pointer;
+    transition: color .15s, background .15s;
+  }
+  .fb-close:hover { color: var(--stationdesk-ink); background: var(--stationdesk-surface-1); }
+  .fb-close svg { width: 15px; height: 15px; display: block;
+                  fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; }
+  .fb-status { min-width: 0; color: var(--stationdesk-mute); font-size: 0.8rem; }
+  .fb-status a { color: var(--stationdesk-primary); }
+
+  footer a { color: var(--stationdesk-primary); }
+  footer { max-width: var(--stationdesk-page); margin: 2.5rem auto 0; color: var(--stationdesk-mute); font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<!-- shared glyph sprite (same-document <use> refs are safe on every browser incl. iOS Safari).
+     All glyphs are StationDesk's own drawings: viewBox 0 0 24 24, body fill="currentColor"
+     (themed via the tile).
+     An accent CUT OUT of that body is fill="var(--app-tile,#fff)" — it must show the tile
+     through, so it is painted in the tile colour, not in white. A literal #fff there is
+     white on a white glyph: the notepad tile drew its lines that way and they were
+     invisible on the launcher for as long as the tile existed. The two surfaces that
+     paint these glyphs both supply --app-tile (the .app[data-cat] rules below; the
+     standalone tile in bin/gen-app-icons.py), so one value drives both. -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="app-devterm" viewBox="0 0 24 24"><rect x="2.6" y="4" width="18.8" height="16" rx="2.6" fill="currentColor"/><path d="M6.6 9.4l3.1 2.6-3.1 2.6" fill="none" stroke="var(--app-tile,#fff)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><rect x="11.6" y="14" width="6" height="1.7" rx=".85" fill="var(--app-tile,#fff)"/></symbol>
+  <symbol id="app-code-server" viewBox="0 0 24 24"><path d="M9 7.5 4 12l5 4.5M15 7.5 20 12l-5 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="app-paseo" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6.6 11.4 16 6.6M6.6 12.6 16 17.4"/></g><g fill="currentColor"><circle cx="5.6" cy="12" r="2.7"/><circle cx="17" cy="6.4" r="2.7"/><circle cx="17" cy="17.6" r="2.7"/></g><g fill="#fff" opacity=".92"><circle cx="5.6" cy="12" r=".95"/><circle cx="17" cy="6.4" r=".95"/><circle cx="17" cy="17.6" r=".95"/></g></symbol>
+  <symbol id="app-fileview" viewBox="0 0 24 24"><rect x="2.4" y="5.4" width="19.2" height="13.2" rx="2.6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.2 5.4v13.2" stroke="currentColor" stroke-width="1.7"/><path d="M4.9 9.1h1.9M4.9 12h1.9M4.9 14.9h1.9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11.7 9.1h7.4M11.7 12h7.4M11.7 14.9h4.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="app-publish" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><ellipse cx="12" cy="12" rx="3.8" ry="8.5"/><path d="M5 8c4.4 2 10.6 2 14 0M5 16c4.4-2 10.6-2 14 0"/></g></symbol>
+  <symbol id="app-notepad" viewBox="0 0 24 24"><rect x="4.8" y="4.4" width="14.4" height="17.2" rx="2.8" fill="currentColor"/><rect x="8.4" y="2.4" width="7.2" height="4.4" rx="1.5" fill="currentColor"/><rect x="8.4" y="2.4" width="7.2" height="4.4" rx="1.5" fill="#000" opacity=".15"/><g fill="var(--app-tile,#fff)"><rect x="8.2" y="11" width="7.6" height="1.6" rx=".8"/><rect x="8.2" y="14.6" width="5.2" height="1.6" rx=".8"/></g></symbol>
+  <symbol id="app-monitor" viewBox="0 0 24 24"><path d="M2.4 13.2h4.2l2.2-6.4 3 11 2.4-7.8 1.8 3.2h5.6" fill="none" stroke="currentColor" stroke-width="1.95" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="app-default" viewBox="0 0 24 24"><rect x="3.2" y="3.2" width="17.6" height="17.6" rx="4.2" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></symbol>
+</svg>
+
+<header>
+  <h1 id="product" aria-label="StationDesk"><span aria-hidden="true">Stat<span class="wordmark-i">ı</span>onDesk</span></h1>
+  <button type="button" class="find-open" id="find-open" aria-label="Search apps" data-i18n-ko-aria-label="앱 검색"
+          aria-expanded="false" aria-controls="launcher-find" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"></circle><path d="m16 16 4.2 4.2"></path></svg>
+  </button>
+  <!-- Owner controls keep Airlock's header positions. -->
+  <button type="button" class="store-open" id="store-open" aria-label="App Store" data-i18n-ko-aria-label="앱스토어"
+          aria-expanded="false" aria-controls="store-modal" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14l-1 12H6z"></path><path d="M9 8a3 3 0 0 1 6 0"></path></svg>
+    <span class="store-badge" id="store-badge" hidden></span>
+  </button>
+  <button type="button" class="gear" id="settings-open" aria-label="StationDesk settings" data-i18n-ko-aria-label="StationDesk 설정"
+          aria-expanded="false" aria-controls="settings-panel" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.3"></circle><path d="M19.1 14.4a1.5 1.5 0 0 0 .3 1.65l.06.06a1.8 1.8 0 1 1-2.55 2.55l-.06-.06a1.5 1.5 0 0 0-1.65-.3 1.5 1.5 0 0 0-.91 1.37v.17a1.8 1.8 0 1 1-3.6 0v-.09a1.5 1.5 0 0 0-.98-1.37 1.5 1.5 0 0 0-1.65.3l-.06.06a1.8 1.8 0 1 1-2.55-2.55l.06-.06a1.5 1.5 0 0 0 .3-1.65 1.5 1.5 0 0 0-1.37-.91H4.2a1.8 1.8 0 1 1 0-3.6h.09a1.5 1.5 0 0 0 1.37-.98 1.5 1.5 0 0 0-.3-1.65l-.06-.06A1.8 1.8 0 1 1 7.85 4.9l.06.06a1.5 1.5 0 0 0 1.65.3h.07a1.5 1.5 0 0 0 .91-1.37V3.7a1.8 1.8 0 1 1 3.6 0v.09a1.5 1.5 0 0 0 .91 1.37 1.5 1.5 0 0 0 1.65-.3l.06-.06a1.8 1.8 0 1 1 2.55 2.55l-.06.06a1.5 1.5 0 0 0-.3 1.65v.07a1.5 1.5 0 0 0 1.37.91h.17a1.8 1.8 0 1 1 0 3.6h-.09a1.5 1.5 0 0 0-1.37.91Z"></path></svg>
+  </button>
+  <button type="button" class="theme-cycle" id="theme-cycle" aria-label="Appearance: Auto"></button>
+  <span class="who" id="who"><i aria-hidden="true"></i><span></span></span>
+  <!-- Settings sheet retains the current agent preference and opens account management. -->
+  <div class="settings" id="settings-panel" role="group" aria-labelledby="set-title" hidden>
+    <div class="set-ttl" id="set-title" data-i18n-ko="StationDesk 설정">StationDesk settings</div>
+
+    <section class="set-sec">
+      <div class="set-row"><label class="set-name" for="settings-language" data-i18n-ko="언어">Language</label>
+        <select id="settings-language" style="font:inherit;color:inherit;background:var(--stationdesk-surface-1);border:1px solid var(--stationdesk-hairline);border-radius:var(--stationdesk-r-sm);padding:6px">
+          <option value="en">English</option><option value="ko">한국어</option>
+        </select>
+      </div>
+    </section>
+    <section class="set-sec">
+      <div class="set-h" data-i18n-ko="에이전트">Agents</div>
+      <div class="set-row">
+        <div class="set-txt">
+          <div class="set-name" data-i18n-ko="기본 에이전트">Default agent</div>
+          <div class="set-note" data-i18n-ko="플랫폼 도구(모니터 액션·자동 작업)가 쓰는 CLI · 모델은 각 CLI 가 정합니다">CLI used by platform tools (monitor actions and automation). Each CLI chooses its model.</div>
+          <!-- Reading and writing the stationdesk.toml platform key is the
+               AGENT_DEFAULT card's; these stay disabled until it lands, so the
+               launcher never shows a choice it cannot keep. -->
+          <div class="set-opts" role="radiogroup" aria-label="Default agent" data-i18n-ko-aria-label="기본 에이전트">
+            <label><input type="radio" name="default-agent" value="auto" checked disabled><span data-i18n-ko="자동">Auto</span></label>
+            <label><input type="radio" name="default-agent" value="claude" disabled><span>Claude</span></label>
+            <label><input type="radio" name="default-agent" value="codex" disabled><span>Codex</span></label>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="set-sec">
+      <div class="set-h" data-i18n-ko="계정">Accounts</div>
+      <div class="set-row"><div class="set-txt"><div class="set-name" data-i18n-ko="에이전트 계정">Agent accounts</div><div class="set-note">Claude Code · Codex · OpenCode · agy</div></div><a class="set-see" href="/accounts/" data-i18n-ko="열기">Open</a></div>
+    </section>
+    <p class="set-foot" id="set-foot" data-i18n-ko="이 박스의 에이전트 로그인 상태를 확인합니다.">Check agent sign-in status on this box.</p>
+  </div>
+</header>
+
+<div class="store-modal" id="store-modal" hidden>
+  <section class="store-sheet" role="dialog" aria-modal="true" aria-labelledby="store-title">
+    <div class="store-head">
+      <div class="store-title" id="store-title" data-i18n-ko="앱스토어">App Store</div>
+      <button type="button" class="store-close" id="store-close" aria-label="Close App Store" data-i18n-ko-aria-label="앱스토어 닫기">✕</button>
+    </div>
+    <!-- Origin alone decides the menu. Company appears only on the paid edition. -->
+    <div class="store-tabs" role="tablist" aria-label="App Store categories" data-i18n-ko-aria-label="앱스토어 항목">
+      <button type="button" class="store-tab" id="store-tab-builtin" role="tab"
+              aria-selected="true" aria-controls="store-pane-builtin" data-store-tab="builtin" data-i18n-ko="기본 앱">Built-in</button>
+      <button type="button" class="store-tab" id="store-tab-company" role="tab"
+              aria-selected="false" aria-controls="store-pane-company" data-store-tab="company" tabindex="-1" hidden data-i18n-ko="회사">Company</button>
+      <button type="button" class="store-tab" id="store-tab-addon" role="tab"
+              aria-selected="false" aria-controls="store-pane-addon" data-store-tab="addon" tabindex="-1" data-i18n-ko="추가 앱">Add-ons</button>
+      <button type="button" class="store-tab" id="store-tab-link" role="tab"
+              aria-selected="false" aria-controls="store-pane-link" data-store-tab="link" tabindex="-1" data-i18n-ko="링크">Links</button>
+    </div>
+    <div class="store-body" id="store-body">
+      <div class="store-progress-note" id="store-checked"></div>
+      <section class="store-pane" id="store-pane-builtin" role="tabpanel" aria-labelledby="store-tab-builtin">
+        <div class="store-alert" id="store-builtin-alert" role="status" hidden></div>
+        <div id="store-builtin"></div>
+      </section>
+      <section class="store-pane" id="store-pane-company" role="tabpanel" aria-labelledby="store-tab-company" hidden>
+        <div class="store-alert" id="store-company-alert" role="status" hidden></div>
+        <div id="store-company"></div>
+      </section>
+      <section class="store-pane" id="store-pane-addon" role="tabpanel" aria-labelledby="store-tab-addon" hidden>
+        <div class="store-alert" id="store-alert" role="status" hidden></div>
+        <div id="store-addon"></div>
+        <form class="store-add-form" id="store-addon-form">
+          <label for="store-addon-source" data-i18n-ko="앱 레포 또는 폴더">App repository or folder</label>
+          <input type="text" id="store-addon-source" autocomplete="off" autocapitalize="none" spellcheck="false"
+                 placeholder="https://example.com/app.git or /path/to/app" data-i18n-ko-placeholder="https://example.com/app.git 또는 /path/to/app" required>
+          <button type="submit" class="store-action store-action-primary store-add-submit" id="store-addon-submit" data-i18n-ko="추가">Add</button>
+          <div class="store-add-hint" data-i18n-ko="선택한 출처를 StationDesk에 추가합니다.">Add the selected source to StationDesk.</div>
+        </form>
+      </section>
+      <section class="store-pane" id="store-pane-link" role="tabpanel" aria-labelledby="store-tab-link" hidden>
+        <div class="store-alert" id="store-link-alert" role="status" hidden></div>
+        <div id="store-link"></div>
+        <form class="store-add-form" id="store-link-form">
+          <label for="store-link-name" data-i18n-ko="이름">Name</label>
+          <input type="text" id="store-link-name" maxlength="80" autocomplete="off" required>
+          <label for="store-link-url" data-i18n-ko="HTTPS 주소">HTTPS URL</label>
+          <input type="url" id="store-link-url" autocomplete="off" autocapitalize="none" spellcheck="false"
+                 placeholder="https://example.com" required>
+          <button type="submit" class="store-action store-action-primary store-add-submit" id="store-link-submit" data-i18n-ko="링크 추가">Add link</button>
+        </form>
+      </section>
+    </div>
+  </section>
+</div>
+<main>
+  <div class="msgstrip" id="msgstrip" hidden></div>
+  <div class="launcher-find" id="launcher-find" hidden>
+    <input type="search" id="app-find" aria-label="Search apps" data-i18n-ko-aria-label="앱 검색"
+           placeholder="Search apps" data-i18n-ko-placeholder="앱 검색" autocomplete="off" autocapitalize="none" spellcheck="false">
+    <button type="button" class="find-close" id="find-close" aria-label="Close app search" data-i18n-ko-aria-label="앱 검색 닫기">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+    </button>
+  </div>
+  <!-- One list, no headings. The order comes from the owner's saved home order
+       and the owner names the one or two lines they want in it. -->
+  <div id="home" class="apps"></div>
+  <!-- Editing controls stay outside the grid so rearranging does not move them. -->
+  <div class="home-editbar" id="home-editbar">
+    <span data-i18n-ko="앱을 끌어 정리">Drag apps to organize</span>
+    <button type="button" class="home-addline" id="home-addline" data-i18n-ko="+ 선 추가">+ Add divider</button>
+    <button type="button" class="home-done" id="home-done" data-i18n-ko="완료">Done</button>
+  </div>
+  <!-- The home screen's one confirmation, filled in per question by stationdeskAsk(). -->
+  <dialog class="home-alert" id="home-alert" aria-labelledby="home-alert-title"
+          aria-describedby="home-alert-message">
+    <div class="home-alert-body">
+      <div class="home-alert-icon" id="home-alert-icon" aria-hidden="true"></div>
+      <h2 id="home-alert-title"></h2>
+      <p id="home-alert-message"></p>
+    </div>
+    <div class="home-alert-actions" id="home-alert-actions"></div>
+  </dialog>
+  <p class="empty" id="empty" hidden data-i18n-ko="설치된 앱이 없습니다. 앱스토어에서 앱을 설치하세요.">No apps installed. Install an app from the App Store.</p>
+  <p class="empty" id="no-matches" hidden data-i18n-ko="검색 결과가 없습니다.">No matching apps.</p>
+</main>
+
+<!-- suggestion box — same-origin; the owner identity is attached server-side by the
+     feedback backend (from the gate header), never sent by this page. Hidden until
+     the backend reports it's configured (GET /feedback/api/health -> enabled).
+     Collapsed: only the small trigger shows until it is clicked. -->
+<section class="feedback" id="feedback" hidden>
+  <button type="button" class="fb-open" id="fb-open"
+          aria-expanded="false" aria-controls="fb-panel" data-i18n-ko="의견 보내기">Send feedback</button>
+  <div class="fb-panel" id="fb-panel" role="region" aria-labelledby="fb-title" hidden>
+    <div class="set-h" id="fb-title" data-i18n-ko="의견 보내기">Send feedback</div>
+    <button type="button" class="fb-close" id="fb-close" aria-label="Close feedback" data-i18n-ko-aria-label="의견 보내기 닫기">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>
+    </button>
+    <textarea id="fb-text" aria-label="Send feedback" data-i18n-ko-aria-label="의견 보내기" placeholder="Share a suggestion or feedback" data-i18n-ko-placeholder="제안이나 의견을 적어 주세요"></textarea>
+    <div class="fb-row">
+      <button type="button" class="fb-send" id="fb-send" data-i18n-ko="보내기">Send</button>
+      <span class="fb-status" id="fb-status" role="status" aria-live="polite"></span>
+    </div>
+  </div>
+</section>
+
+<footer>StationDesk · <span data-i18n-ko="직접 운영하는 개발 작업 공간 · 오픈 소스">Self-hosted development workspace · Open source</span> (<a href="https://www.gnu.org/licenses/agpl-3.0.html" rel="license noopener" target="_blank">AGPL-3.0</a>) · <a href="https://github.com/spacewalk-labs/stationdesk" rel="noopener" target="_blank" data-i18n-ko="소스 코드">Source code</a> · © 2026 Spacewalk</footer>
+
+<script>
+const languageSelect = document.getElementById("settings-language");
+languageSelect.value = StationDeskI18n.language();
+languageSelect.addEventListener("change", () => {
+  StationDeskI18n.setLanguage(languageSelect.value);
+  location.reload();
+});
+
+async function j(url) { const r = await fetch(url, { cache: "no-store" }); return r.ok ? r.json() : null; }
+
+// D7/F14: may an app's tile render for this viewer? Pure and FAIL-CLOSED —
+// Fail-closed both ways: only an explicit "shared" audience shows to everyone
+// the hub admits. Anything else — "owner", an audience this launcher does not
+// know, or none at all — needs a verified owner, so an unknown role (whoami
+// fetch failed, role field absent) hides the tile too. Silence is not a
+// clearance: an app that never declared who it serves is not thereby shared.
+// Extracted so install/test-hub-filter.sh can exercise it in node without a
+// browser.
+function stationdeskTileVisible(audience, role) {
+  if (audience === "shared") return true;
+  return role === "owner";
+}
+
+// F14: which tile model renders for an app — manifest webjson only (child
+// 4/P3 retires the built-in APPS presentation registry and its name-fallback:
+// every app reaching this function is a shipped package, so its tile data,
+// if any, always comes from its manifest). No [tile] in the manifest renders
+// NOTHING (null). Extracted so install/test-hub-filter.sh can exercise it in
+// node.
+function stationdeskTileMeta(entry) {
+  const t = entry.tile;
+  if (!t) return null;
+  return { label: t.label, sub: t.sub || "", cat: t.cat || null,
+           path: t.path, glyph: t.glyph || null, brand: t.icon || null, badgeUrl: t.badge_url || null };
+}
+
+// How many named lines the home screen carries. Two is the whole rule, and it
+// lives here and nowhere else: the hub is the only place a line is created, so
+// the cap is a product decision made where the decision happens. The server
+// normalises the SHAPE of a line and never counts them.
+const STATIONDESK_HOME_LINES = 2;
+
+// What the home screen draws, in order. Pure, so install/test-hub-filter.sh can
+// hold it against fixtures in node.
+//
+// An app row survives when the install record (③) names it — not when a config
+// table does. A link row survives on its own, because a link has no install
+// record; what a link needs is to be on the home order at all.
+//
+// `installed` is null when the owner API could not be read, and then nothing is
+// filtered at all: an unreadable order must leave the manifest's list intact
+// rather than replace it with an empty launcher. That is the whole reason this
+// function filters against an argument instead of counting tiles itself.
+function stationdeskHomeItems(order, installed, apps) {
+  const catalogue = (apps && typeof apps === "object") ? apps : {};
+  const rows = Array.isArray(order) ? order : [];
+  const have = (installed == null) ? null
+    : new Set(Array.isArray(installed) ? installed : []);
+  return rows.filter(row => {
+    if (row !== null && typeof row === "object")
+      return typeof row.line === "string";
+    if (typeof row !== "string" || !row) return false;
+    const entry = catalogue[row];
+    if (have === null) return !!entry;
+    if (entry && entry.link) return true;
+    return have.has(row);
+  });
+}
+
+// Which of the three icons a row draws: the image, else a glyph the sprite really
+// has, else the default. Decided before anything touches the DOM so both the
+// launcher tile and the store row go through the same answer — the earlier split
+// is what shipped a blank square for a file that was never staged.
+//
+// `hasGlyph` is injectable so node can hold this without a document. An unknown
+// glyph name renders as an empty tile with no error anywhere, which is exactly
+// the failure this check exists to prevent.
+function stationdeskIcon(entry, hasGlyph) {
+  const known = typeof hasGlyph === "function" ? hasGlyph
+    : (id) => typeof document !== "undefined" && !!document.getElementById(id);
+  const image = entry && typeof entry.icon === "string" ? entry.icon.trim() : "";
+  const glyph = entry && typeof entry.glyph === "string" ? entry.glyph.trim() : "";
+  if (image) return { kind: "image", src: image };
+  if (glyph && known(glyph)) return { kind: "glyph", id: glyph };
+  return { kind: "glyph", id: "app-default" };
+}
+
+// The DOM half of stationdeskIcon, shared by the home tile and the store row. One
+// image failing is not a blank tile: the row falls to the glyph declared beside
+// it in the same entry, and to the default glyph if there is none.
+function stationdeskIconNode(entry, className, onBrand) {
+  const box = document.createElement("span");
+  box.className = className;
+  const icon = stationdeskIcon(entry);
+  if (icon.kind !== "image") {
+    box.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#'
+      + icon.id + '"/></svg>';
+    return box;
+  }
+  const img = document.createElement("img");
+  img.src = icon.src; img.alt = ""; img.draggable = false;
+  img.addEventListener("error", () => {
+    // Same entry, image dropped: stationdeskIcon then decides between the glyph the
+    // source declared and the default. Passing its previous RESULT back in would
+    // read {kind, id} as an entry and skip the declared glyph entirely.
+    box.textContent = "";
+    box.classList.remove("has-brand");
+    box.appendChild(stationdeskIconNode(Object.assign({}, entry, { icon: "" }), "").firstChild);
+    if (onBrand) onBrand(false);
+  }, { once: true });
+  box.appendChild(img);
+  box.classList.add("has-brand");
+  if (onBrand) onBrand(true);
+  return box;
+}
+
+// 을 or 를 for a name, the way iOS phrases "“X”을(를) 삭제하겠습니까?": a Hangul
+// syllable decides by its final consonant, anything else keeps both.
+function stationdeskObjectParticle(word) {
+  const code = String(word).trim().slice(-1).charCodeAt(0) - 0xac00;
+  if (!(code >= 0 && code <= 11171)) return "을(를)";
+  return code % 28 ? "을" : "를";
+}
+
+// The home screen's one question, as an iOS alert. `actions` are drawn top to
+// bottom as [{ label, role, value }]; the answer is the pressed action's value,
+// and Esc, the backdrop and a "cancel" role all answer null. `icon` is a tile
+// whose picture heads the alert, so the question shows what it is about.
+function stationdeskAsk({ title, message = "", icon = null, actions }) {
+  const dialog = document.getElementById("home-alert");
+  if (!dialog || typeof dialog.showModal !== "function") return Promise.resolve(null);
+  document.getElementById("home-alert-title").textContent = title;
+  document.getElementById("home-alert-message").textContent = message;
+  const picture = document.getElementById("home-alert-icon");
+  picture.textContent = "";
+  picture.className = "home-alert-icon";
+  picture.removeAttribute("style");
+  const source = icon && icon.querySelector(".ic");
+  if (source) {
+    for (const child of source.childNodes) picture.appendChild(child.cloneNode(true));
+    const look = getComputedStyle(icon);
+    for (const name of ["--app-tile", "--app-glyph"]) {
+      const value = look.getPropertyValue(name).trim();
+      if (value) picture.style.setProperty(name, value);
+    }
+    picture.classList.toggle("has-brand", icon.classList.contains("has-brand"));
+  }
+  const row = document.getElementById("home-alert-actions");
+  row.textContent = "";
+  return new Promise(resolve => {
+    let answer = null;
+    for (const action of actions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = action.label;
+      if (action.role) button.dataset.role = action.role;
+      button.addEventListener("click", () => {
+        answer = action.role === "cancel" ? null : action.value;
+        dialog.close();
+      });
+      row.appendChild(button);
+    }
+    dialog.onclick = event => { if (event.target === dialog) dialog.close(); };
+    dialog.addEventListener("close", () => resolve(answer), { once: true });
+    dialog.showModal();
+    // The safe answer has the focus, so Enter on a keyboard never deletes.
+    const cancel = row.querySelector('[data-role="cancel"]');
+    if (cancel) cancel.focus();
+  });
+}
+
+function stationdeskMatchesApp(name, label, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return true;
+  return (String(name) + " " + String(label)).toLowerCase().includes(q);
+}
+
+// Same-day shows a clock; older dates remain visible in the store's last-check line.
+function stationdeskWhen(iso) {
+  if (!iso) return "";
+  let d;
+  try { d = new Date(iso); } catch (_) { return String(iso); }
+  if (isNaN(d.getTime())) return String(iso);
+  const clock = d.toLocaleTimeString(StationDeskI18n.language(), { hour: "2-digit", minute: "2-digit" });
+  return (d.toDateString() === new Date().toDateString())
+    ? StationDeskI18n.t("Today ", "오늘 ") + clock
+    : d.toLocaleDateString(StationDeskI18n.language()) + " " + clock;
+}
+
+(function () {
+  // Auto -> Light -> Dark, then Auto again. One button, because that is one
+  // decision with three answers; three buttons made the header wider than the
+  // search control on a phone and asked the same question three times.
+  const order = ["system", "light", "dark"];
+  const themes = new Set(order);
+  const names = { system: StationDeskI18n.t("Auto", "자동"), light: StationDeskI18n.t("Light", "밝게"), dark: StationDeskI18n.t("Dark", "어둡게") };
+  const glyphs = {
+    system: '<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/>',
+    light: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+    dark: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
+  };
+  const root = document.documentElement;
+  const button = document.getElementById("theme-cycle");
+  const themeColor = document.querySelector('meta[name="theme-color"]');
+  const lightPreference = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)");
+
+  function reflect(theme) {
+    if (button) {
+      button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+        + glyphs[theme] + "</svg>";
+      const label = StationDeskI18n.t("Appearance: ", "화면 모드: ") + names[theme];
+      button.title = label;
+      button.setAttribute("aria-label", label);
+    }
+    const light = theme === "light" || (theme === "system" && lightPreference && lightPreference.matches);
+    if (themeColor) themeColor.content = light ? "#F5F5F7" : "#1F2937";
+  }
+
+  function setTheme(theme) {
+    if (!themes.has(theme)) theme = "system";
+    root.dataset.theme = theme;
+    // The same key the launcher's first paint already reads, so a reload cannot
+    // disagree with what the button last showed.
+    try { localStorage.setItem("stationdesk-theme", theme); } catch (_) {}
+    reflect(theme);
+  }
+
+  if (button) {
+    button.addEventListener("click", () => {
+      const next = order[(order.indexOf(root.dataset.theme) + 1) % order.length];
+      setTheme(themes.has(next) ? next : "system");
+    });
+  }
+  if (lightPreference && lightPreference.addEventListener) {
+    lightPreference.addEventListener("change", () => {
+      if (root.dataset.theme === "system") reflect("system");
+    });
+  }
+  reflect(themes.has(root.dataset.theme) ? root.dataset.theme : "system");
+})();
+
+(async () => {
+  let cfg = await j("/__stationdesk-hub.json");
+  const me = await j("/hub/__owner.json");
+  if (cfg && cfg.product) {
+    document.title = cfg.product;
+  }
+  const who = document.getElementById("who");
+  if (who && me && me.email) {
+    // The pill keeps the address and its initial; the narrow header drops the
+    // address (see the .who rule) and keeps the initial.
+    who.querySelector("i").textContent = String(me.email).trim().charAt(0).toUpperCase();
+    who.querySelector("span").textContent = me.email;
+  }
+
+  const home = document.getElementById("home");
+  let apps = (cfg && cfg.apps) || {};
+  const manifestNames = () => Object.keys(apps).filter(n => n !== "hub" && n !== "feedback");
+
+  // The saved home order, and what the install record says is on this box.
+  // `installed` is null until an owner read answers, and null means "do not
+  // filter" — an unreadable owner API must leave the manifest's list intact
+  // rather than replace the launcher with nothing.
+  let homeOrder = manifestNames();
+  let installed = null;
+  let required = null;
+  if (me && !!me.email) {
+    try {
+      const response = await fetch("/monitor/api/owner/home/order", { cache: "no-store" });
+      const value = response.ok ? await response.json() : null;
+      // `installed: null` means this box could not name its install record. An
+      // empty `order` next to it is the server's honest "I know nothing", not a
+      // request to blank the launcher — so the manifest order stands.
+      if (value && Array.isArray(value.order) && value.installed !== null) {
+        homeOrder = value.order;
+        installed = Array.isArray(value.installed) ? value.installed : null;
+        required = value.required;
+      }
+    } catch (_) {}
+  }
+
+  function renderHubTiles(nextCfg) {
+    cfg = nextCfg;
+    apps = (cfg && cfg.apps) || {};
+    if (cfg && cfg.product) {
+      document.title = cfg.product;
+    }
+    // Only use a dotted canonical name for external port links. A short hostname
+    // has no certificate, so location.hostname is only a fallback.
+    const host = (cfg && cfg.fqdn && cfg.fqdn.indexOf(".") > 0) ? cfg.fqdn : location.hostname;
+    home.textContent = "";
+    for (const row of stationdeskHomeItems(homeOrder, installed, apps)) {
+      home.appendChild(row !== null && typeof row === "object"
+        ? lineNode(row)
+        : tileNode(String(row), host));
+    }
+    reflectLines();
+    filterApps();
+    if (window.StationDeskAppBadges) window.StationDeskAppBadges.mount(home);
+  }
+
+  function tileNode(name, host) {
+    const entry = apps[name] || {};
+    if (!stationdeskTileVisible(entry.audience, me && me.email ? "owner" : null)) return document.createComment("hidden");
+    const meta = stationdeskTileMeta(entry);
+    if (!meta) return document.createComment("no tile");
+
+    const a = document.createElement("a");
+    a.className = "app";
+    // An <a> carries the platform's own long-press drag on touch, and the
+    // gesture this screen owns is a long press. Not negotiable.
+    a.draggable = false;
+    a.href = entry.port ? `https://${host}:${entry.port}/` : (meta.path || `/${name}/`);
+    if (meta.badgeUrl) a.dataset.badgeUrl = meta.badgeUrl;
+    a.dataset.appName = name;
+    a.dataset.appLabel = meta.label;
+    a.dataset.homeRow = "1";
+    if (meta.cat) a.dataset.cat = meta.cat;
+    if (entry.external || meta.external) { a.target = "_blank"; a.rel = "noopener"; }
+
+    a.appendChild(stationdeskIconNode(
+      { icon: meta.brand, glyph: meta.glyph }, "ic",
+      brand => a.classList.toggle("has-brand", brand)));
+    const lb = document.createElement("span");
+    lb.className = "lb";
+    lb.textContent = meta.label;
+    a.appendChild(lb);
+    if (meta.sub) {
+      const sub = document.createElement("span");
+      sub.className = "sub";
+      sub.textContent = meta.sub;
+      a.appendChild(sub);
+    }
+    if (tileRemovable(name, entry)) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "app-remove";
+      remove.dataset.homeRemove = "1";
+      remove.setAttribute("aria-label", meta.label + StationDeskI18n.t(" delete", " 삭제"));
+      remove.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>';
+      a.appendChild(remove);
+    }
+    return a;
+  }
+
+  // Whether a tile wears the edit-mode ×. Nobody's does until the owner block
+  // below replaces this, so a collaborator's home screen never offers a delete.
+  let tileRemovable = () => false;
+
+  // Two hooks the editor installs, declared where a line node can reach them. A
+  // line is drawn for every viewer but only the owner may rename or drop one, so
+  // both default to doing nothing and the owner block replaces them.
+  let removeLine = () => {};
+  let renameLine = () => {};
+
+  // A named line. In edit mode the label becomes an input and a × appears; the
+  // name is saved on change rather than on every keystroke, so typing a name is
+  // one write instead of one per letter.
+  function lineNode(row) {
+    const node = document.createElement("div");
+    node.className = "home-line";
+    node.dataset.homeRow = "1";
+    node.dataset.homeLine = row.line || "";
+    // Assigned once the node exists, so a name typed and then Tab-ed away is
+    // saved without the person having to click the row first.
+    node.__line = row;
+    const rule = document.createElement("hr");
+    const label = document.createElement("div");
+    label.className = "home-line-label";
+    const name = document.createElement("span");
+    name.className = "home-line-name";
+    name.textContent = row.line || "";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.maxLength = 40;
+    input.value = row.line || "";
+    input.placeholder = StationDeskI18n.t("Name this divider", "이 선의 이름");
+    input.setAttribute("aria-label", StationDeskI18n.t("Divider name", "선 이름"));
+    // change, not input: one write per finished name, not one per keystroke.
+    input.addEventListener("change", () => renameLine(node, input.value));
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.className = "home-line-drop";
+    drop.dataset.homeDropLine = "1";
+    drop.setAttribute("aria-label", StationDeskI18n.t("Remove divider", "선 지우기"));
+    drop.textContent = "×";
+    label.append(name, input, drop);
+    node.append(rule, label);
+    node.addEventListener("click", event => {
+      if (event.target.closest("[data-home-drop-line]")) {
+        event.preventDefault(); event.stopPropagation();
+        removeLine(node);
+      }
+    });
+    node.__rename = (value) => {
+      name.textContent = value;
+      node.dataset.homeLine = value;
+    };
+    return node;
+  }
+
+  const findWrap = document.getElementById("launcher-find");
+  const find = document.getElementById("app-find");
+  const findOpen = document.getElementById("find-open");
+  const findClose = document.getElementById("find-close");
+  const noMatches = document.getElementById("no-matches");
+
+  function filterApps() {
+    const query = find.value;
+    let matches = 0;
+    // Lines are structure, not content: searching for an app must not hide the
+    // dividers, or the results read as one unrelated list.
+    for (const node of home.querySelectorAll("[data-home-row]")) {
+      if (node.dataset.homeLine !== undefined) continue;
+      const meta = stationdeskTileMeta(apps[node.dataset.appName]);
+      const visible = stationdeskMatchesApp(node.dataset.appName, meta && meta.label, query);
+      node.hidden = !visible;
+      if (visible) matches += 1;
+    }
+    noMatches.hidden = !String(query).trim() || !!matches;
+  }
+
+  function closeFind() {
+    find.value = "";
+    filterApps();
+    findWrap.hidden = true;
+    findOpen.setAttribute("aria-expanded", "false");
+  }
+
+  findOpen.hidden = false;
+  findOpen.addEventListener("click", () => {
+    findWrap.hidden = false;
+    findOpen.setAttribute("aria-expanded", "true");
+    find.focus();
+  });
+  findClose.addEventListener("click", () => {
+    closeFind();
+    findOpen.focus();
+  });
+  find.addEventListener("input", () => {
+    if (!find.value.trim()) closeFind();
+    else filterApps();
+  });
+
+  // Re-read both halves of what the launcher draws and redraw. The store calls
+  // this after adding or placing a link, because the server republished
+  // /__stationdesk-hub.json and moved the id inside the home order — neither of which
+  // this page can see without asking again. A failure keeps the last render: an
+  // unreadable projection must not blank a home screen somebody is using.
+  window.stationdeskRefreshHubTiles = async function () {
+    let value;
+    try {
+      const response = await fetch("/__stationdesk-hub.json", { cache: "no-store" });
+      if (!response.ok) return false;
+      value = await response.json();
+    } catch (_) { return false; }
+    if (!value || typeof value !== "object" || Array.isArray(value)
+        || !value.apps || typeof value.apps !== "object" || Array.isArray(value.apps)) {
+      return false;
+    }
+    if (me && !!me.email) {
+      try {
+        const response = await fetch("/monitor/api/owner/home/order", { cache: "no-store" });
+        const read = response.ok ? await response.json() : null;
+        if (read && Array.isArray(read.order) && read.installed !== null) {
+          homeOrder = read.order;
+          installed = Array.isArray(read.installed) ? read.installed : installed;
+          required = read.required;
+        } else if (read && Array.isArray(read.order) && read.installed === null) {
+          // This box cannot name its install record. Keeping the previous filter
+          // would keep hiding the apps it can no longer vouch for, so the filter
+          // comes off and the manifest's own order stands. A read that FAILED is
+          // a different thing and keeps the last render.
+          installed = null;
+          homeOrder = Object.keys(value.apps).filter(n => n !== "hub" && n !== "feedback");
+        }
+      } catch (_) {}
+    }
+    renderHubTiles(value);
+    filterApps();
+    return true;
+  };
+
+  // The DOM is the order. Every write this screen makes — a drop, a new line, a
+  // renamed line, a removed one — is "ask the list what it now says, save that",
+  // so there is no second copy to fall out of step with what is on screen. Hidden
+  // ids are the server's to preserve: it re-attaches every id the saved file
+  // holds, which is exactly what the client cannot see.
+  function visibleOrder() {
+    return Array.from(home.querySelectorAll("[data-home-row]"), node =>
+      node.dataset.homeLine !== undefined ? { line: node.dataset.homeLine }
+                                          : node.dataset.appName);
+  }
+
+  async function persist() {
+    if (!(me && !!me.email)) return;
+    const order = visibleOrder();
+    try {
+      const response = await fetch("/monitor/api/owner/home/order", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order }),
+      });
+      const value = response.ok ? await response.json() : null;
+      if (value && Array.isArray(value.order)) homeOrder = value.order;
+    } catch (_) {}
+  }
+
+  function reflectLines() {
+    const addline = document.getElementById("home-addline");
+    if (!addline) return;
+    const lines = stationdeskHomeItems(homeOrder, installed, apps)
+      .filter(row => row !== null && typeof row === "object").length;
+    addline.hidden = lines >= STATIONDESK_HOME_LINES;
+  }
+
+  // Long press edits: one gesture from press to drag. Pointer events give mouse
+  // and touch the same implementation; FLIP keeps the icons that are not being
+  // dragged moving into their new slots instead of jumping.
+  if (me && !!me.email) {
+    const root = document.documentElement;
+    root.dataset.homeOrderOwner = "1";
+    let editing = false;
+    let drag = null, ghost = null, pressTimer = null, pointerId = null;
+    let pressPointerId = null, pressX = 0, pressY = 0, pressSlop = 6;
+    let pressLastX = 0, pressLastY = 0;
+    let justDragged = false;
+    let pressed = null, settling = false, grabX = 0, grabY = 0, originalRows = [];
+    const slides = new Map();
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+    function clearPress() {
+      if (pressTimer) clearTimeout(pressTimer);
+      if (pressed) pressed.classList.remove("home-pressing");
+      pressTimer = pressed = pressPointerId = null;
+    }
+
+    // Offset geometry is the CSS Grid layout, unaffected by the FLIP animation.
+    function layoutBox(node) {
+      const homeBox = home.getBoundingClientRect();
+      return { left: homeBox.left + node.offsetLeft, top: homeBox.top + node.offsetTop,
+        width: node.offsetWidth, height: node.offsetHeight };
+    }
+
+    function setEditing(on) {
+      editing = on;
+      root.dataset.homeEdit = on ? "1" : "0";
+      if (!on && document.activeElement && document.activeElement.blur) {
+        document.activeElement.blur();
+      }
+      reflectLines();
+    }
+
+    function rowsIn() {
+      return Array.from(home.querySelectorAll("[data-home-row]"));
+    }
+
+    // Remove exactly the line that was pressed, and ask the DOM for the result.
+    // Filtering by name took every line with that name — including two unnamed
+    // ones — and re-rendering before the removal rebuilt the row that was being
+    // removed, so the DOM and the saved array stopped being the same thing.
+    removeLine = (node) => {
+      setEditing(true);
+      node.remove();
+      homeOrder = visibleOrder();
+      renderHubTiles(cfg);
+      const input = home.querySelector(".home-line input");
+      if (input) input.focus();
+      persist();
+    };
+
+    renameLine = (node, value) => {
+      if (node.__rename) node.__rename(value);
+      homeOrder = visibleOrder();
+      persist();
+    };
+
+    // What a × deletes for real: an installed app (the ledger engine removes it)
+    // or an owner link (through the same CLI queue). Not offered:
+    //   * the core apps named by the server's existing required-app contract;
+    //   * a Company link — shared, and not this box's to delete. Taking one off
+    //     only this home screen is an edit of the saved order, which every
+    //     screen writes back whole, so it needs its own design.
+    tileRemovable = (name, entry) => entry.link === true
+      ? entry.audience === "owner"
+      : Array.isArray(required) && !required.includes(name)
+        && Array.isArray(installed) && installed.includes(name);
+
+    function removalQuestion(name, label) {
+      const entry = apps[name] || {};
+      const quoted = "“" + label + "”" + StationDeskI18n.t("", stationdeskObjectParticle(label));
+      if (!entry.link) {
+        return { kind: "app", confirm: StationDeskI18n.t("Delete app", "앱 삭제"), title: quoted + StationDeskI18n.t(" — delete?", " 삭제하겠습니까?"),
+          message: StationDeskI18n.t("Remove the app services and installed files from this box. Saved app data remains available if you reinstall.", "이 박스에서 앱의 서비스와 설치 파일을 지웁니다. 앱이 저장한 데이터는 남아 있어, 다시 설치하면 이어서 쓸 수 있습니다.") };
+      }
+      return { kind: "link", confirm: StationDeskI18n.t("Delete link", "링크 삭제"), title: quoted + StationDeskI18n.t(" — delete?", " 삭제하겠습니까?"),
+        message: StationDeskI18n.t("Remove this link from the home screen and App Store links.", "이 링크를 홈 화면과 앱스토어 링크 목록에서 지웁니다.") };
+    }
+
+    // The server's error codes on these two routes, in words. Anything else is
+    // shown with its HTTP status rather than guessed at.
+    const REMOVE_WORDS = {
+      app_locked: StationDeskI18n.t("This app cannot be deleted.", "이 앱은 지울 수 없습니다."),
+      bad_app_id: StationDeskI18n.t("App name not recognized.", "앱 이름을 알아보지 못했습니다."),
+      launch_failed: StationDeskI18n.t("Could not start deletion. Check that tmux is installed.", "삭제를 시작하지 못했습니다. tmux가 설치돼 있는지 확인하십시오."),
+      state_unwritable: StationDeskI18n.t("Could not write the run record. Deletion did not start.", "실행 기록을 쓰지 못해 삭제를 시작하지 않았습니다."),
+      links_unreadable: StationDeskI18n.t("Could not update your links file safely. Remove the link in ~/.config/stationdesk/links.toml.", "개인 링크 파일을 안전하게 고치지 못해 그대로 두었습니다. ~/.config/stationdesk/links.toml 에서 직접 지우십시오."),
+      hub_refresh_failed: StationDeskI18n.t("Could not rebuild the home screen. The links file was restored. Try again shortly.", "홈 화면을 다시 만들지 못해 링크 파일을 원래대로 되돌렸습니다. 잠시 후 다시 시도하십시오."),
+      link_not_found: StationDeskI18n.t("This link was not found on this box.", "이 박스에서 찾을 수 없는 링크입니다."),
+      config_unavailable: StationDeskI18n.t("Could not read settings. Try again.", "현재 설정을 읽지 못했습니다. 다시 시도하십시오."),
+    };
+    function removeWords(value, status) {
+      const code = String(value && value.error || "");
+      return REMOVE_WORDS[code] || StationDeskI18n.t("Request rejected (HTTP ", "요청이 거부됐습니다 (HTTP ") + status + (code ? ", " + code : "") + ").";
+    }
+
+    // An app's removal runs outside this service — the same runner the store's
+    // buttons use — and its result lands on disk. Poll it; null is success,
+    // anything else is the sentence to show.
+    async function removeApp(name) {
+      const response = await fetch("/monitor/api/owner/apps/" + encodeURIComponent(name) + "/remove", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      let value = null; try { value = await response.json(); } catch (_) {}
+      if (!response.ok || !value || !value.run_id) return removeWords(value, response.status);
+      return waitRemoval(value.run_id);
+    }
+    async function waitRemoval(runId) {
+      for (let misses = 0; ;) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        let run = null;
+        try {
+          const read = await fetch("/monitor/api/owner/updates/run?run_id=" + encodeURIComponent(runId),
+            { cache: "no-store" });
+          run = read.ok ? ((await read.json()) || {}).run : null;
+        } catch (_) {}
+        if (!run) {
+          // A dropped read is not a finished run; give up telling only after a minute.
+          if (++misses > 40) return StationDeskI18n.t("Could not confirm deletion. Refresh the home screen shortly to check.", "삭제가 끝났는지 확인하지 못했습니다. 잠시 뒤 홈 화면을 새로 고쳐 확인하십시오.");
+          continue;
+        }
+        misses = 0;
+        if (run.status === "done") return null;
+        if (run.status !== "starting" && run.status !== "running") {
+          return run.note || StationDeskI18n.t("Deletion did not finish. Check the run output.", "삭제가 끝맺지 못했습니다. 실행 창의 출력을 확인하십시오.");
+        }
+      }
+    }
+
+    async function removeLink(name) {
+      const response = await fetch("/monitor/api/owner/apps/remove-link", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: name }),
+      });
+      let value = null; try { value = await response.json(); } catch (_) {}
+      return response.ok && value && value.run_id ? waitRemoval(value.run_id) : removeWords(value, response.status);
+    }
+
+    async function removeTile(node) {
+      const name = node.dataset.appName;
+      const label = node.dataset.appLabel || name;
+      const question = removalQuestion(name, label);
+      const yes = await stationdeskAsk({ title: question.title, message: question.message, icon: node,
+        actions: [{ label: question.confirm, role: "destructive", value: true },
+                  { label: StationDeskI18n.t("Cancel", "취소"), role: "cancel" }] });
+      if (!yes) return;
+      // A refresh while the question was open redraws every tile; act on the live one.
+      if (!node.isConnected) node = rowsIn().find(row => row.dataset.appName === name);
+      if (!node) return;
+      node.classList.add("home-removing");
+      let failure;
+      try {
+        failure = question.kind === "app" ? await removeApp(name) : await removeLink(name);
+      } catch (_) {
+        failure = StationDeskI18n.t("No response received. Check your connection and try again.", "응답을 받지 못했습니다. 연결을 확인하고 다시 시도하십시오.");
+      }
+      // A redraw while it ran made a new tile; the live one is the one to change.
+      if (!node.isConnected) node = rowsIn().find(row => row.dataset.appName === name) || node;
+      if (failure) {
+        node.classList.remove("home-removing");
+        await stationdeskAsk({ title: "“" + label + StationDeskI18n.t("” could not be deleted", "” 삭제하지 못함"), message: failure,
+          actions: [{ label: StationDeskI18n.t("OK", "확인"), role: "cancel" }] });
+        return;
+      }
+      // As on an iPad: the icon shrinks away, then the others slide into the gap.
+      if (!reducedMotion.matches && node.animate) {
+        await node.animate([{ transform: "scale(1)", opacity: 1 }, { transform: "scale(.2)", opacity: 0 }],
+          { duration: 200, easing: "ease-in", fill: "forwards" }).finished.catch(() => {});
+      }
+      const before = new Map(rowsIn().filter(row => row !== node && row.dataset.appName)
+        .map(row => [row.dataset.appName, row.getBoundingClientRect()]));
+      // Its slot stays in the saved order, invisible, like any uninstalled app's;
+      // the redraw drops the tile because nothing describes it any more.
+      node.remove();
+      await window.stationdeskRefreshHubTiles();
+      if (!reducedMotion.matches) {
+        for (const row of rowsIn()) {
+          const from = before.get(row.dataset.appName);
+          if (!from || !row.animate) continue;
+          const to = row.getBoundingClientRect();
+          const dx = from.left - to.left, dy = from.top - to.top;
+          if (dx || dy) row.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }],
+            { duration: 260, easing: "cubic-bezier(.22,.8,.25,1)" });
+        }
+      }
+      // The store reads its rows again: the app reads as Install, a link as gone.
+      window.dispatchEvent(new Event("stationdesk-apps-changed"));
+    }
+
+    function moveTo(target, after) {
+      if (!drag || !target || target === drag
+          || target.parentElement !== home) return;
+      const nodes = rowsIn();
+      const before = new Map(nodes.map(node => [node, node.getBoundingClientRect()]));
+      for (const animation of slides.values()) animation.cancel();
+      slides.clear();
+      home.insertBefore(drag, after ? target.nextSibling : target);
+      if (reducedMotion.matches) return;
+      for (const node of nodes) {
+        if (node === drag) continue;
+        const from = before.get(node), to = layoutBox(node);
+        const dx = from.left - to.left, dy = from.top - to.top;
+        if (dx || dy) slides.set(node, node.animate([
+          { transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" },
+        ], { duration: 260, easing: "cubic-bezier(.22,.8,.25,1)" }));
+      }
+    }
+
+    function stop(event, cancel = false) {
+      if (event && event.pointerId !== (drag ? pointerId : pressPointerId)) return;
+      clearPress();
+      if (!drag) return;
+      const node = drag, floating = ghost, captured = pointerId;
+      // Release capture only after clearing the active drag: its lost event is
+      // a consequence of this drop, not another cancellation.
+      drag = ghost = pointerId = null;
+      if (cancel) {
+        for (const animation of slides.values()) animation.cancel();
+        slides.clear();
+        for (const row of originalRows) home.appendChild(row);
+      } else {
+        persist();
+      }
+      originalRows = [];
+      settling = true;
+      const box = layoutBox(node);
+      floating.style.transition = reducedMotion.matches ? "none"
+        : "left .24s cubic-bezier(.2,.85,.3,1.12), top .24s cubic-bezier(.2,.85,.3,1.12), transform .24s cubic-bezier(.2,.85,.3,1.12)";
+      floating.style.left = box.left + "px";
+      floating.style.top = box.top + "px";
+      floating.style.transform = "scale(1)";
+      const landed = () => {
+        floating.remove();
+        node.classList.remove("home-dragging");
+        settling = false;
+      };
+      if (reducedMotion.matches) landed();
+      else setTimeout(landed, 240);
+      if (home.hasPointerCapture && home.hasPointerCapture(captured)) {
+        home.releasePointerCapture(captured);
+      }
+    }
+
+    function start(node, event) {
+      clearPress();
+      drag = node;
+      pointerId = event.pointerId;
+      originalRows = rowsIn();
+      const box = layoutBox(node);
+      grabX = event.clientX - box.left; grabY = event.clientY - box.top;
+      ghost = node.cloneNode(true);
+      // A tile can already be sliding. Never inherit its grid transform into
+      // the fixed overlay, or pickup flies in from the old slot (mockup defect).
+      ghost.removeAttribute("style");
+      ghost.removeAttribute("id");
+      ghost.setAttribute("aria-hidden", "true");
+      ghost.tabIndex = -1;
+      ghost.className = "app home-drag-ghost" + (node.classList.contains("has-brand") ? " has-brand" : "");
+      ghost.style.width = box.width + "px";
+      ghost.style.left = box.left + "px";
+      ghost.style.top = box.top + "px";
+      ghost.style.transformOrigin = `${grabX}px ${grabY}px`;
+      ghost.style.transform = "scale(1)";
+      document.body.appendChild(ghost);
+      node.classList.add("home-dragging");
+      ghost.getBoundingClientRect();
+      const floating = ghost;
+      requestAnimationFrame(() => {
+        if (ghost === floating && !reducedMotion.matches) floating.style.transform = "scale(1.10)";
+      });
+      // Grid capture survives moving the tile within the DOM. Tile capture
+      // would be lost on insertBefore and incorrectly cancel the rearrangement.
+      if (home.setPointerCapture) home.setPointerCapture(event.pointerId);
+    }
+
+    home.addEventListener("pointerdown", event => {
+      if (!event.isPrimary || event.button !== 0 || drag || settling || pressTimer) return;
+      // The × is a button, not a handle: pressing it must not pick the tile up.
+      if (event.target.closest && event.target.closest("[data-home-remove]")) return;
+      const node = event.target.closest("[data-home-row]");
+      if (!node || node.dataset.homeLine !== undefined || !home.contains(node)) return;
+      if (editing) { event.preventDefault(); start(node, event); return; }
+      pressed = node;
+      node.classList.add("home-pressing");
+      pressPointerId = event.pointerId;
+      pressX = pressLastX = event.clientX; pressY = pressLastY = event.clientY;
+      pressSlop = event.pointerType === "mouse" ? 6 : 16;
+      pressTimer = setTimeout(() => {
+        pressTimer = null;
+        // touch-action is fixed at pointerdown, so it is lifted HERE and the same
+        // pointerId starts the drag. Lifting it after the press, or on a later
+        // press, is what made the old code require letting go and pressing again.
+        setEditing(true);
+        start(node, { pointerId: event.pointerId, clientX: pressLastX, clientY: pressLastY });
+      }, 500);
+    });
+
+    // 🔴 The first gesture is the hard one. `touch-action` is read at pointerdown
+    // and cannot be raised afterwards, and a `pointermove` preventDefault arrives
+    // too late: the browser has already committed to a scroll and answers with
+    // pointercancel. A non-passive `touchmove` is the only signal that arrives
+    // while the scroll is still cancelable, so it is bound for the whole press —
+    // pending or dragging — not only for the drag.
+    document.addEventListener("touchmove", event => {
+      if (pressTimer || drag) event.preventDefault();
+    }, { passive: false });
+
+    document.addEventListener("pointermove", event => {
+      if (!drag) {
+        if (pressTimer && event.pointerId === pressPointerId) {
+          pressLastX = event.clientX; pressLastY = event.clientY;
+          if (Math.hypot(event.clientX - pressX, event.clientY - pressY) > pressSlop) clearPress();
+        }
+        return;
+      }
+      if (event.pointerId !== pointerId) return;
+      ghost.style.left = event.clientX - grabX + "px";
+      ghost.style.top = event.clientY - grabY + "px";
+      const draggedBox = layoutBox(drag);
+      const x = event.clientX - grabX + draggedBox.width / 2;
+      const y = event.clientY - grabY + draggedBox.height / 2;
+      // Nearest layout slot also covers the gaps. A divider is full-width, so
+      // its distance is vertical and its midpoint determines which side to use.
+      let over = null, distance = Infinity;
+      for (const node of rowsIn()) {
+        if (node.hidden) continue;
+        const box = layoutBox(node);
+        const dx = node.dataset.homeLine !== undefined ? 0 : x - box.left - box.width / 2;
+        const dy = y - box.top - box.height / 2;
+        const next = dx * dx + dy * dy;
+        if (next < distance) { over = node; distance = next; }
+      }
+      if (!over || over === drag) return;
+      const box = layoutBox(over);
+      const after = over.dataset.homeLine !== undefined
+        ? y > box.top + box.height / 2
+        : rowsIn().indexOf(drag) < rowsIn().indexOf(over);
+      moveTo(over, after);
+    }, { passive: false });
+
+    document.addEventListener("pointerup", event => {
+      if (event.pointerId !== (drag ? pointerId : pressPointerId)) return;
+      clearPress();
+      if (drag) { stop(event); justDragged = true; setTimeout(() => { justDragged = false; }, 0); }
+    });
+    document.addEventListener("pointercancel", event => stop(event, true));
+    home.addEventListener("lostpointercapture", event => stop(event, true));
+    window.addEventListener("blur", () => stop(null, true));
+    document.addEventListener("visibilitychange", () => { if (document.hidden) stop(null, true); });
+    home.addEventListener("pointerleave", event => {
+      if (!drag && pressTimer && event.pointerId === pressPointerId && event.buttons) clearPress();
+    });
+    const done = document.getElementById("home-done");
+    if (done) done.addEventListener("click", () => { stop(); setEditing(false); });
+
+    // A tap launches only outside editing; a drop cannot become a launch.
+    home.addEventListener("click", event => {
+      const remove = editing && event.target.closest("[data-home-remove]");
+      if (remove) {
+        // Captured here so neither the tile's link nor the end-of-edit click runs.
+        event.preventDefault(); event.stopPropagation();
+        removeTile(remove.closest(".app"));
+        return;
+      }
+      if (editing && event.target.closest(".app")) event.preventDefault();
+    }, true);
+    document.addEventListener("click", event => {
+      // The click a drop produces must not also end the edit: the finger can lift
+      // over empty space, and that is the same gesture, not a second one. Swallow
+      // exactly that click rather than a timer — a dropped click that leaks into
+      // the next one would close the mode the person is still using.
+      const dropped = justDragged;
+      justDragged = false;
+      if (!editing || dropped) return;
+      if (event.target.closest("[data-home-row], header, .home-editbar, .home-alert")) return;
+      stop(); setEditing(false);
+    });
+    document.addEventListener("keydown", event => {
+      // Esc on an open alert answers the alert; it does not also end editing.
+      const asking = document.getElementById("home-alert");
+      if (asking && asking.open) return;
+      if (event.key === "Escape" && editing) { stop(null, true); setEditing(false); }
+    });
+    home.addEventListener("contextmenu", event => {
+      if (event.target.closest(".app")) event.preventDefault();
+    });
+    home.addEventListener("dragstart", event => {
+      if (event.target.closest("[data-home-row]")) event.preventDefault();
+    });
+    const addline = document.getElementById("home-addline");
+    if (addline) {
+      addline.addEventListener("click", event => {
+        event.stopPropagation();
+        if (homeOrder.filter(row => row !== null && typeof row === "object").length
+            >= STATIONDESK_HOME_LINES) return;
+        homeOrder = homeOrder.concat([{ line: "" }]);
+        setEditing(true);
+        renderHubTiles(cfg);
+        const inputs = home.querySelectorAll(".home-line input");
+        if (inputs.length) inputs[inputs.length - 1].focus();
+        persist();
+      });
+    }
+    reflectLines();
+  }
+  renderHubTiles(cfg);
+})();
+// iOS home-screen standalone: a plain same-origin <a> can bounce out to Safari.
+// Force same-origin navigations through location.href so they stay in the app.
+// Cross-origin links (separate-port tools, external=true) are left alone.
+if (("standalone" in navigator) && navigator.standalone) {
+  document.addEventListener("click", function (e) {
+    if (e.defaultPrevented) return;
+    const a = e.target.closest && e.target.closest("a[href]");
+    if (!a || a.target === "_blank") return;
+    let u; try { u = new URL(a.href, location.href); } catch (_) { return; }
+    if (u.origin === location.origin) { e.preventDefault(); location.href = u.href; }
+  });
+}
+</script>
+
+<script src="/assets/devmon-card-ui.js"></script>
+<script src="/assets/devmon-inbox.js"></script>
+<script>
+(() => {
+  const strip = document.getElementById("msgstrip");
+  if (strip) {
+    strip.classList.add("devmon-inbox");
+    DevmonInbox.mount(strip, {mode: "strip"});
+  }
+})();
+</script>
+
+<script>
+// Owner app store — one modal sheet over the launcher. The backend owns app facts
+// and mutation validation; this page renders the GET contract and POSTs named
+// actions. Three menus, one per origin: a row's state is the backend's word for
+// it and this file never re-judges it. Installing an app uses the full-installer
+// path; adding a link writes the link file and republishes the projection.
+(async () => {
+  const open = document.getElementById("store-open");
+  const modal = document.getElementById("store-modal");
+  const close = document.getElementById("store-close");
+  const body = document.getElementById("store-body");
+  const alerts = {
+    builtin: document.getElementById("store-builtin-alert"),
+    company: document.getElementById("store-company-alert"),
+    addon: document.getElementById("store-alert"),
+    link: document.getElementById("store-link-alert"),
+  };
+  const builtinEl = document.getElementById("store-builtin");
+  const companyEl = document.getElementById("store-company");
+  const addonEl = document.getElementById("store-addon");
+  const linkEl = document.getElementById("store-link");
+  const addonForm = document.getElementById("store-addon-form");
+  const addonSource = document.getElementById("store-addon-source");
+  const addonSubmit = document.getElementById("store-addon-submit");
+  const linkForm = document.getElementById("store-link-form");
+  const linkName = document.getElementById("store-link-name");
+  const linkUrl = document.getElementById("store-link-url");
+  const linkSubmit = document.getElementById("store-link-submit");
+  const tabs = Array.from(modal.querySelectorAll("[data-store-tab]"));
+  const panes = Array.from(modal.querySelectorAll(".store-pane"));
+  const badge = document.getElementById("store-badge");
+  const checkedEl = document.getElementById("store-checked");
+  if (!open || !modal || !close || !body) return;
+
+  // The three words a row can say, and nothing else. Every row's state comes
+  // from the backend's single `state` field, so a row and its detail can never
+  // tell two different stories about whether something is installed.
+  const STATE_LABEL = { update: StationDeskI18n.t("Update", "업데이트"), install: StationDeskI18n.t("Install", "설치"), installed: StationDeskI18n.t("Installed", "설치됨") };
+  const ORIGIN_WORD = { builtin: StationDeskI18n.t("Built-in", "기본 앱"), company: StationDeskI18n.t("Company", "회사"), addon: StationDeskI18n.t("Add-ons", "추가 앱"), link: StationDeskI18n.t("Links", "링크") };
+
+  let rows = [];
+  let lastFocus = null;
+  const rowMessages = new Map();
+
+  function updates(data) {
+    return data && data.updates && typeof data.updates === "object" ? data.updates : {};
+  }
+  function rowMessageNode(message) {
+    const note = document.createElement("div");
+    note.className = "store-run-note";
+    note.setAttribute("role", "status");
+    note.textContent = message.text;
+    if (message.bad) note.style.color = "var(--stationdesk-danger)";
+    return note;
+  }
+  function setAlert(text, bad, runContext = null) {
+    if (runContext && runContext.id && text) {
+      const message = {text, bad};
+      rowMessages.set(runContext.id, message);
+      const row = Array.from(modal.querySelectorAll("[data-store-row]"))
+        .find(item => item.dataset.storeRow === runContext.id);
+      if (row) {
+        const previous = row.querySelector(".store-run-note");
+        if (previous) previous.remove();
+        row.querySelector(".store-row-text").appendChild(rowMessageNode(message));
+        return;
+      }
+    }
+    const alert = alerts[runContext ? runContext.origin : "addon"];
+    alert.textContent = text || "";
+    alert.hidden = !text;
+    alert.style.borderColor = bad ? "var(--stationdesk-danger)" : "var(--stationdesk-hairline)";
+    alert.style.color = bad ? "var(--stationdesk-danger)" : "var(--stationdesk-body)";
+  }
+  function setTab(name, focus) {
+    for (const tab of tabs) {
+      const on = tab.dataset.storeTab === name;
+      tab.setAttribute("aria-selected", String(on));
+      tab.tabIndex = on ? 0 : -1;
+      if (on && focus) tab.focus();
+    }
+    for (const pane of panes) pane.hidden = pane.id !== "store-pane-" + name;
+  }
+  function setOpen(on) {
+    modal.hidden = !on;
+    open.setAttribute("aria-expanded", String(on));
+    document.body.style.overflow = on ? "hidden" : "";
+    if (on) {
+      lastFocus = document.activeElement;
+      for (const origin of Object.keys(alerts)) setAlert("", false, {origin});
+      const current = tabs.find(tab => tab.getAttribute("aria-selected") === "true");
+      (current || tabs[0]).focus();
+      pollApps();
+    } else if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+  function empty(target, text) {
+    const el = document.createElement("div");
+    el.className = "store-empty";
+    el.textContent = text;
+    target.appendChild(el);
+  }
+
+  // What pressing this row's one button does. Derived from `state` and nothing
+  // else — no client-side re-judging of what is installed, which is what let the
+  // old sheet and its detail disagree.
+  function actionFor(row) {
+    if (row.kind === "link") {
+      if (row.origin === "company") return { action: row.state === "install" ? "install" : "remove", primary: false };
+      return row.state === "install" ? { action: "place-link", primary: false } : null;
+    }
+    // The platform is a row, but it is not an app id: `action: "app"` with
+    // id "platform" is refused as not-pending, so the two must be told apart.
+    if (row.state === "update") {
+      return row.kind === "platform"
+        ? { action: "platform", primary: true } : { action: "update", primary: true };
+    }
+    if (row.state !== "install") return null;
+    if (row.kind === "platform") return null;
+    return { action: "install", primary: true };
+  }
+
+  function rowNode(row) {
+    const wrap = document.createElement("div");
+    wrap.className = "store-row";
+    wrap.dataset.storeRow = row.id;
+    wrap.appendChild(stationdeskIconNode({ icon: row.icon, glyph: row.glyph },
+      "store-row-icon", brand => wrap.classList.toggle("has-brand", brand)));
+    const text = document.createElement("div");
+    text.className = "store-row-text";
+    const name = document.createElement("div");
+    name.className = "store-row-name";
+    name.textContent = StationDeskI18n.t(row.name, row.name_ko || row.name) || row.id;
+    const note = document.createElement("div");
+    note.className = "store-row-note";
+    note.textContent = StationDeskI18n.t(row.desc, row.desc_ko || row.desc) || "";
+    note.title = note.textContent;
+    text.append(name, note);
+    if (rowMessages.has(row.id)) text.appendChild(rowMessageNode(rowMessages.get(row.id)));
+    wrap.appendChild(text);
+
+    const spec = actionFor(row);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "store-action" + (spec && spec.primary ? " store-action-primary" : "");
+    button.textContent = row.origin === "company" && row.kind === "link" ? (row.state === "install" ? StationDeskI18n.t("Show on home", "홈 표시") : StationDeskI18n.t("Remove from home", "홈 해제")) : STATE_LABEL[row.state] || row.state;
+    button.disabled = !spec;
+    if (spec) {
+      button.dataset.storeAction = spec.action;
+      button.dataset.appId = row.id;
+      if (!spec.primary) button.title = StationDeskI18n.t("Add to home", "홈 화면에 놓기");
+    } else if (row.state === "installed") {
+      button.title = StationDeskI18n.t("Already on this box.", "이미 이 박스에 있습니다.");
+    }
+    wrap.appendChild(button);
+
+    // Where a row's origin, address and icon came from. Off the row until it is
+    // asked for: hover on a pointer, a tap on a finger. A second pinned row closes
+    // the first, so the sheet never grows a stack of open boxes.
+    const pop = document.createElement("div");
+    pop.className = "store-detail-pop";
+    const list = document.createElement("dl");
+    const pairs = [[StationDeskI18n.t("Category", "구분"), ORIGIN_WORD[row.origin] || row.origin],
+                   [StationDeskI18n.t("Source", "출처"), (row.visibility === "private" ? "🔒 " : "") + (row.source || row.url || "-")],
+                   [StationDeskI18n.t("ID", "식별자"), row.id], [StationDeskI18n.t("Status", "상태"), STATE_LABEL[row.state] || row.state]];
+    if (row.url) pairs.push([StationDeskI18n.t("Link", "링크"), row.url]);
+    // The backend's own detail pairs (a package's served path today; the digest
+    // and source grade arrive with P3_ENGINE's unified repository). Rendered as
+    // with a Korean path label; other fields keep their supplied name.
+    for (const [key, value] of Object.entries(row.detail || {})) pairs.push([key === "Path" ? StationDeskI18n.t("Path", "경로") : key, value]);
+    for (const [key, value] of pairs) {
+      const dt = document.createElement("dt"); dt.textContent = key;
+      const dd = document.createElement("dd"); dd.textContent = String(value);
+      list.append(dt, dd);
+    }
+    pop.appendChild(list);
+    wrap.appendChild(pop);
+    return wrap;
+  }
+
+  function render(data) {
+    rows = Array.isArray(data.rows) ? data.rows.filter(r => r && r.id) : [];
+    const companyEnabled = data.company_enabled === true;
+    document.getElementById("store-tab-company").hidden = !companyEnabled;
+    if (!companyEnabled && document.getElementById("store-tab-company").getAttribute("aria-selected") === "true") setTab("addon", false);
+    builtinEl.textContent = "";
+    companyEl.textContent = "";
+    addonEl.textContent = "";
+    linkEl.textContent = "";
+    const groups = { builtin: [], company: [], addon: [], link: [] };
+    for (const row of rows) (groups[row.origin] || groups.addon).push(row);
+    const byState = { update: 0, installed: 1, install: 2 };
+    const targets = { builtin: builtinEl, company: companyEl, addon: addonEl, link: linkEl };
+    const emptyWords = { builtin: StationDeskI18n.t("No built-in apps.", "기본 앱이 없습니다."), company: StationDeskI18n.t("No company apps.", "회사 앱이 없습니다."), addon: StationDeskI18n.t("No add-on apps.", "추가한 앱이 없습니다."), link: StationDeskI18n.t("No links.", "링크가 없습니다.") };
+    for (const origin of Object.keys(groups)) {
+      if (origin === "company" && !companyEnabled) continue;
+      groups[origin].sort((a, b) => (byState[a.state] - byState[b.state])
+        || String(a.name).localeCompare(String(b.name)));
+      for (const row of groups[origin]) targets[origin].appendChild(rowNode(row));
+      if (!groups[origin].length) empty(targets[origin], emptyWords[origin]);
+    }
+    // One object, two readings: the count on the entrance and the time on this
+    // line come from the same `updates(data)`, so the badge can never advertise a
+    // number from one collection while the sheet dates it to another. An absent or
+    // unusable `checkedAt` says so — a number with no time behind it is not fresh.
+    const snap = updates(data);
+    const when = stationdeskWhen(snap.checkedAt);
+    checkedEl.textContent = when
+      ? StationDeskI18n.t("Last checked ", "마지막 확인 ") + when
+      : StationDeskI18n.t("No check recorded — the measurement time below is unknown", "확인 기록 없음 — 아래 숫자가 언제 측정된 것인지 알 수 없습니다");
+    // The badge counts the rows that offer an update button.
+    if (typeof window.stationdeskSetUpdateIds === "function") {
+      window.stationdeskSetUpdateIds(rows.filter(item => item.state === "update")
+        .map(item => item.id));
+    }
+    const count = rows.filter(item => item.state === "update").length;
+    badge.hidden = count === 0;
+    badge.textContent = String(count);
+    open.setAttribute("aria-label", count ? StationDeskI18n.t("App Store — updates: ", "앱스토어 — 업데이트 ") + count + StationDeskI18n.t("", "건") : StationDeskI18n.t("App Store", "앱스토어"));
+    open.hidden = false;
+    document.documentElement.dataset.appStore = "1";
+  }
+
+  async function pollApps() {
+    let response;
+    try {
+      response = await fetch("/monitor/api/owner/apps", { cache: "no-store" });
+    } catch (_) { return false; }
+    if (response.status === 403 || response.status === 404) {
+      setOpen(false); open.hidden = true; delete document.documentElement.dataset.appStore;
+      return false;
+    }
+    if (!response.ok) return false;
+    let value; try { value = await response.json(); } catch (_) { return false; }
+    if (!value || typeof value !== "object" || Array.isArray(value)
+        || !Array.isArray(value.rows)) return false;
+    render(value);
+    return true;
+  }
+
+  async function addLink(event) {
+    event.preventDefault();
+    const name = linkName.value.trim();
+    const url = linkUrl.value.trim();
+    if (!name || !url) return;
+    const runContext = {origin: "link", label: StationDeskI18n.t("Add link", "링크 추가"), success: StationDeskI18n.t("Added to home.", "홈에 표시했습니다.")};
+    const notify = (text, bad) => setAlert(text, bad, runContext);
+    linkSubmit.disabled = true;
+    notify(StationDeskI18n.t("Adding link…", "링크를 추가합니다…"), false);
+    try {
+      const response = await fetch("/monitor/api/owner/apps/links/add", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({name, url}),
+      });
+      const answer = await response.json();
+      if (!response.ok || answer.ok !== true) throw new Error(answer.error || StationDeskI18n.t("Could not add the link.", "링크를 추가하지 못했습니다."));
+      linkForm.reset();
+      pollRun(answer.run_id, runContext);
+    } catch (error) { notify(error.message, true); }
+    finally { linkSubmit.disabled = false; }
+  }
+
+  async function addAddon(event) {
+    event.preventDefault();
+    const source = addonSource.value.trim();
+    if (!source) return;
+    const runContext = {origin: "addon", label: StationDeskI18n.t("Add app", "앱 추가")};
+    const notify = (text, bad) => setAlert(text, bad, runContext);
+    addonSubmit.disabled = true;
+    notify(StationDeskI18n.t("Starting add-on app…", "추가 앱을 시작합니다…"), false);
+    try {
+      const response = await fetch("/monitor/api/owner/apps/add", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({source}),
+      });
+      const answer = await response.json();
+      if (!response.ok || !answer.run_id) throw new Error(answer.error || StationDeskI18n.t("Could not start the add-on app.", "추가 앱을 시작하지 못했습니다."));
+      notify(StationDeskI18n.t("Processing the add-on app.", "추가 앱을 처리하고 있습니다."), false);
+      setTimeout(() => pollRun(answer.run_id, runContext), 1000);
+    } catch (error) { notify(error.message, true); }
+    finally { addonSubmit.disabled = false; }
+  }
+
+  async function refreshLinkViews() {
+    // The launcher draws links from the manifest projection, so a link edit
+    // refreshes the launcher in place and then re-reads the store. The store's
+    // own sheet stays mounted and open.
+    const hubRefreshed = typeof window.stationdeskRefreshHubTiles === "function"
+      ? await window.stationdeskRefreshHubTiles() : false;
+    const appsRefreshed = await pollApps();
+    return hubRefreshed && appsRefreshed;
+  }
+
+  // Placing an existing link on the home screen is the same write the launcher
+  // makes: read the order, append this id, post it back. No second endpoint for
+  // one append.
+  async function placeLink(id, button) {
+    const runContext = {id, origin: "link", label: StationDeskI18n.t("Add to home", "홈 화면에 놓기")};
+    const notify = (text, bad) => setAlert(text, bad, runContext);
+    button.disabled = true;
+    notify(StationDeskI18n.t("Adding to home…", "홈 화면에 놓습니다…"), false);
+    let response, value = null;
+    try {
+      response = await fetch("/monitor/api/owner/home/order", { cache: "no-store" });
+      value = response.ok ? await response.json() : null;
+      if (!value || !Array.isArray(value.order)) throw new Error("order unavailable");
+      response = await fetch("/monitor/api/owner/home/order", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order: value.order.concat([id]) }),
+      });
+      const written = response.ok ? await response.json() : null;
+      if (!response.ok || !written || !Array.isArray(written.order)) throw new Error("write failed");
+    } catch (_) {
+      if (button.isConnected) button.disabled = false;
+      notify(StationDeskI18n.t("Could not add to home. Try again.", "홈 화면에 놓지 못했습니다. 다시 시도하십시오."), true);
+      return;
+    }
+    const refreshed = await window.stationdeskRefreshHubTiles();
+    await pollApps();
+    notify(refreshed ? StationDeskI18n.t("Added to home.", "홈 화면에 놓았습니다.") : StationDeskI18n.t("Added to home, but could not refresh. Reopen to check.", "홈 화면에 놓았지만 새로 읽지 못했습니다. 다시 열어 확인하십시오."),
+      !refreshed);
+  }
+
+  async function pollRun(runId, runContext) {
+    const notify = (text, bad) => setAlert(text, bad, runContext);
+    if (!runId) return;
+    let response;
+    try { response = await fetch("/monitor/api/owner/updates/run" + (runId ? "?run_id=" + encodeURIComponent(runId) : ""), { cache: "no-store" }); }
+    catch (_) {
+      // A dropped request is not a finished run.
+      notify(StationDeskI18n.t("Could not read run status (connection lost). Completion is unknown.", "실행 상태를 읽지 못했습니다 (연결 끊김) — 끝났는지 아직 알 수 없습니다."), true);
+      setTimeout(() => pollRun(runId, runContext), 4000);
+      return;
+    }
+    if (!response.ok) {
+      notify(StationDeskI18n.t("Could not read run status (HTTP ", "실행 상태를 읽지 못했습니다 (HTTP ") + response.status +
+        StationDeskI18n.t("). Completion is unknown.", ") — 끝났는지 아직 알 수 없습니다."), true);
+      setTimeout(() => pollRun(runId, runContext), 4000);
+      return;
+    }
+    let value;
+    try { value = await response.json(); }
+    catch (_) {
+      notify(StationDeskI18n.t("Could not parse run status. Completion is unknown.", "실행 상태 응답을 해석하지 못했습니다 — 끝났는지 아직 알 수 없습니다."), true);
+      setTimeout(() => pollRun(runId, runContext), 4000);
+      return;
+    }
+    const run = value && value.run;
+    if (run && (run.status === "starting" || run.status === "running")) {
+      notify(runContext.label + StationDeskI18n.t(" — in progress.", " — 진행 중입니다."), false);
+      setTimeout(() => pollRun(runId, runContext), 2500);
+      return;
+    }
+    const done = run && run.status === "done";
+    const output = String(run && (run.note || run.output) || "").trim();
+    notify(done ? (runContext.success || runContext.label + StationDeskI18n.t(" — complete.", " — 완료되었습니다."))
+      : runContext.label + StationDeskI18n.t(" could not be completed.", "를 완료하지 못했습니다.")
+        + (output ? "\n" + output : StationDeskI18n.t(" No reason in the run result. Check the output in Dev Monitor.", " 실행 결과에 이유가 없습니다. Dev Monitor에서 실행 출력을 확인하십시오.")), !done);
+    await refreshLinkViews();
+  }
+  async function mutate(action, id, button) {
+    const row = rows.find(item => item.id === id);
+    const runContext = {id, origin: row ? row.origin : "builtin",
+      success: row && row.kind === "link" ? row.name + " — " + (action === "remove" ? StationDeskI18n.t("Removed from home.", "홈에서 뺐습니다.") : StationDeskI18n.t("Added to home.", "홈에 표시했습니다.")) : "",
+      label: (row ? row.name : id) + " " + ({install: StationDeskI18n.t("Install", "설치"), update: StationDeskI18n.t("Update", "업데이트"), platform: StationDeskI18n.t("Update", "업데이트"), remove: StationDeskI18n.t("Remove", "제거")}[action] || action)};
+    const notify = (text, bad) => setAlert(text, bad, runContext);
+    button.disabled = true;
+    notify(StationDeskI18n.t("Starting request…", "요청을 시작합니다…"), false);
+    const path = action === "platform" || action === "update"
+      ? "/monitor/api/owner/updates/execute"
+      : "/monitor/api/owner/apps/" + encodeURIComponent(id) + "/" + action;
+    const installs = action === "install";
+    const payload = action === "platform" ? {action: "platform"}
+      : action === "update" ? {action: "app", id} : {};
+    let response;
+    try {
+      response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    } catch (_) {
+      notify(StationDeskI18n.t("Connection lost. Could not confirm the request result.", "응답이 끊겨 요청 결과를 확인하지 못했습니다."), false);
+      notify(StationDeskI18n.t("Could not confirm the request result.", "요청 결과를 확인하지 못했습니다."), true);
+      return;
+    }
+    let value = null; try { value = await response.json(); } catch (_) {}
+    if (!response.ok) {
+      button.disabled = false;
+      const messages = { app_not_installed: StationDeskI18n.t("This app is not installed.", "설치되지 않은 앱입니다."),
+        bad_app_id: StationDeskI18n.t("App name not recognized.", "앱 이름을 알아보지 못했습니다."),
+        // Measured against the handlers, not guessed: stationdesk-dev-monitor.py answers
+        // these on this very path and the map had no words for any of them, so each
+        // arrived as a bare HTTP number.
+        bad_action: StationDeskI18n.t("Action not recognized.", "이 동작을 알아보지 못했습니다."),
+        bad_package_path: StationDeskI18n.t("Package path not recognized.", "패키지 경로를 알아보지 못했습니다."),
+        package_preview_changed: StationDeskI18n.t("The app name at the selected path changed. Preview it again.", "선택한 경로의 앱 이름이 바뀌었습니다. 다시 미리보기 하십시오."),
+        app_not_found: StationDeskI18n.t("This app cannot be read on this box.", "이 박스에서 읽을 수 없는 앱입니다."),
+        app_locked: StationDeskI18n.t("This app cannot be removed.", "이 앱은 제거할 수 없습니다."),
+        app_plan_unavailable: StationDeskI18n.t("Could not read app status. Try again.", "현재 앱 상태를 읽지 못했습니다. 다시 시도하십시오.") };
+      const reason = value && value.reason ? " (" + value.reason + ")" : "";
+      // The two "not enabled" answers are sentences, not codes, and they mean the
+      // feature is off on this box rather than the request being wrong.
+      const raw = String(value && value.error || "");
+      const off = raw.endsWith("not enabled")
+        ? StationDeskI18n.t("This feature is disabled on this box (", "이 박스에서 꺼져 있는 기능입니다 (") + raw + ")." : "";
+      notify((messages[raw] || off || StationDeskI18n.t("Request rejected (HTTP ", "요청이 거부됐습니다 (HTTP ") + response.status + ").") + reason, true);
+      return;
+    }
+    notify(StationDeskI18n.t("Request started. Checking app installation status.", "요청을 시작했습니다. 앱 설치 상태를 확인합니다."), false);
+    if (installs) button.textContent = StationDeskI18n.t("In progress…", "진행 중…");
+    setTimeout(() => pollRun(value && value.run_id, runContext), 1000);
+  }
+  open.addEventListener("click", () => setOpen(true));
+  close.addEventListener("click", () => setOpen(false));
+  modal.addEventListener("click", event => { if (event.target === modal) setOpen(false); });
+  linkForm.addEventListener("submit", addLink);
+  addonForm.addEventListener("submit", addAddon);
+  tabs.forEach(tab => {
+    tab.addEventListener("click", () => setTab(tab.dataset.storeTab, false));
+    tab.addEventListener("keydown", event => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const visible = tabs.filter(item => !item.hidden);
+      const current = visible.indexOf(tab);
+      const next = (current + (event.key === "ArrowRight" ? 1 : visible.length - 1)) % visible.length;
+      setTab(visible[next].dataset.storeTab, true);
+    });
+  });
+  // A row's detail box: hover on a pointer, one tap on a finger. Both go through
+  // the same handler, and only one row is ever open.
+  modal.addEventListener("mouseover", event => {
+    if (!window.matchMedia || !window.matchMedia("(hover: hover)").matches) return;
+    const host = event.target.closest(".store-row");
+    if (!host) return;
+    for (const pinned of modal.querySelectorAll(".store-row.pinned")) {
+      if (pinned !== host) pinned.classList.remove("pinned");
+    }
+    host.classList.add("pinned");
+  });
+  body.addEventListener("click", event => {
+    const button = event.target.closest("button[data-store-action]");
+    if (button && !button.disabled) {
+      const action = button.dataset.storeAction;
+      if (action === "place-link") placeLink(button.dataset.appId, button);
+      else mutate(action, button.dataset.appId, button);
+      return;
+    }
+    const host = event.target.closest(".store-row");
+    for (const pinned of modal.querySelectorAll(".store-row.pinned")) {
+      if (pinned !== host) pinned.classList.remove("pinned");
+    }
+    if (host && window.matchMedia && !window.matchMedia("(hover: hover)").matches) {
+      host.classList.toggle("pinned");
+    }
+  });
+  modal.addEventListener("keydown", event => {
+    if (event.key === "Escape") { event.preventDefault(); setOpen(false); return; }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(modal.querySelectorAll("button:not([disabled]):not([hidden]), input:not([disabled]), select:not([disabled]), a[href]"))
+      .filter(node => node.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
+  window.addEventListener("stationdesk-apps-changed", pollApps);
+
+  // Resolve the same owner gate as the other owner surfaces before drawing or
+  // fetching app inventory. Unknown identity is retried; a collaborator is final.
+  let owner = null;
+  async function boot() {
+    let me = null; try { me = await j("/hub/__owner.json"); } catch (_) {}
+    if (!me) return;
+    owner = !!me.email;
+    clearInterval(bootTimer);
+    if (owner) pollApps();
+  }
+  const bootTimer = setInterval(() => { if (owner === null) boot(); else clearInterval(bootTimer); }, 30000);
+  boot();
+})();
+</script>
+
+<script>
+(() => {
+  const gear = document.getElementById('settings-open');
+  const panel = document.getElementById('settings-panel');
+  gear.hidden = false;
+  gear.addEventListener('click', () => { panel.hidden = !panel.hidden; gear.setAttribute('aria-expanded', String(!panel.hidden)); });
+  document.addEventListener('click', event => { if (!panel.hidden && !panel.contains(event.target) && !gear.contains(event.target)) { panel.hidden = true; gear.setAttribute('aria-expanded','false'); } });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') { panel.hidden = true; gear.setAttribute('aria-expanded','false'); } });
+  let wanted = new Set();
+  const home = document.getElementById('home');
+  function paint() { for (const tile of home.querySelectorAll('.app[data-app-name]')) {
+    let dot = tile.querySelector(':scope > .dot');
+    if (wanted.has(tile.dataset.appName) && !dot) { dot = document.createElement('span'); dot.className='dot'; dot.title=StationDeskI18n.t("Update available", "업데이트 있음"); tile.append(dot); }
+    if (!wanted.has(tile.dataset.appName) && dot) dot.remove();
+  } }
+  window.stationdeskSetUpdateIds = ids => { wanted = new Set(ids || []); paint(); };
+  new MutationObserver(paint).observe(home,{childList:true});
+})();
+</script>
+
+<script>
+// Suggestion box: POST only {text} to the same-origin /feedback/api/ — the owner
+// is attached server-side by the backend from the gate header (never sent here).
+// The box stays hidden unless the backend reports it's configured, and even then
+// only the small "Feedback" trigger shows until it is clicked.
+(async () => {
+  const sec = document.getElementById("feedback");
+  const open = document.getElementById("fb-open");
+  const panel = document.getElementById("fb-panel");
+  const close = document.getElementById("fb-close");
+  const ta = document.getElementById("fb-text");
+  const btn = document.getElementById("fb-send");
+  const status = document.getElementById("fb-status");
+  if (!sec) return;
+
+  let health = null;
+  try {
+    const r = await fetch("/feedback/api/health", { cache: "no-store" });
+    if (r.ok) health = await r.json();
+  } catch (_) { /* backend down -> box stays hidden */ }
+  if (!health || !health.enabled) return;   // unconfigured -> no box (degrade cleanly)
+  sec.hidden = false;
+
+  // Disclosure: the trigger yields to the panel (one of the two is visible), so
+  // the collapsed launcher shows a single small pill and nothing else.
+  const setOpen = (on) => {
+    panel.hidden = !on;
+    open.hidden = on;
+    open.setAttribute("aria-expanded", String(on));
+    if (on) ta.focus();
+    else { status.textContent = ""; open.focus(); }
+  };
+  open.addEventListener("click", () => setOpen(true));
+  close.addEventListener("click", () => setOpen(false));
+  // Esc always closes: the textarea keeps its value, so a draft survives being
+  // collapsed and comes back on the next open.
+  panel.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); setOpen(false); }
+  });
+
+  btn.addEventListener("click", async () => {
+    const text = (ta.value || "").trim();
+    if (!text) { status.textContent = StationDeskI18n.t("Please enter your feedback.", "내용을 입력해 주세요."); return; }
+    btn.disabled = true;
+    status.textContent = StationDeskI18n.t("Sending…", "보내는 중…");
+    try {
+      const r = await fetch("/feedback/api/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      let d = null; try { d = await r.json(); } catch (_) {}
+      if (r.ok && d && d.ok) {
+        ta.value = "";
+        status.textContent = "";
+        if (d.issue_url) {
+          status.append(StationDeskI18n.t("Sent · ", "보냈습니다 · "));
+          const a = document.createElement("a");
+          a.href = d.issue_url; a.target = "_blank"; a.rel = "noopener";
+          a.textContent = StationDeskI18n.t("Open", "열기");
+          status.append(a);
+        } else {
+          status.textContent = StationDeskI18n.t("Sent. Thank you!", "보냈습니다. 감사합니다!");
+        }
+      } else {
+        status.textContent = StationDeskI18n.t("Could not send: ", "보내기 실패: ") + ((d && d.error) || r.status);
+      }
+    } catch (e) {
+      status.textContent = StationDeskI18n.t("Could not send: ", "보내기 실패: ") + e;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
+
+<script src="/assets/porthole.js" defer></script>
+</body>
+</html>

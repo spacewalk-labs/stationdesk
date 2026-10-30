@@ -1,0 +1,7 @@
+label = "Orca"
+icon = "orca.png"
+description = "Agent development environment — run agents side by side in each git worktree with Orca ADE"
+description_ko = "에이전트 개발 환경 — git worktree 마다 에이전트를 나란히 돌리는 Orca ADE"
+port = 19942
+serve = 19940
+files = ["runtime/orca", "state/orca", "~/.config/orca/stationdesk-pairing-code"]

@@ -1,0 +1,1029 @@
+#!/usr/bin/env python3
+"""StationDesk app engine. Python 3.11+, standard library only."""
+
+import argparse
+from contextlib import contextmanager, nullcontext
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from string import Template
+import tomllib
+from urllib.parse import urlsplit
+import urllib.request
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from stationdesk_company import Catalog
+from stationdesk_diagnostics import diagnostic_tail
+
+
+def run(args, **kwargs):
+    """All external commands pass through here; tests replace this function."""
+    return subprocess.run(args, text=True, **({'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE} | kwargs))
+
+
+def folder_digest(directory):
+    """The installed content identity of a folder app, shared with update discovery."""
+    directory = Path(directory)
+    digest = hashlib.sha256()
+    for parent, directories, files in os.walk(directory, followlinks=True):
+        directories[:] = sorted(name for name in directories
+                                if name != '.git')
+        for name in sorted(files):
+            path = Path(parent) / name
+            if path.is_file():
+                digest.update(str(path.relative_to(directory)).encode())
+                with path.open('rb') as stream:
+                    while chunk := stream.read(1024 * 1024):
+                        digest.update(chunk)
+    return digest.hexdigest()
+
+
+class Engine:
+    def __init__(self, root):
+        self.root = Path(root).absolute()
+        self.unit_dir = Path.home() / '.config/systemd/user'
+        self.ledger = self.root / 'state/installed.json'
+
+    def command(self, args, **kwargs):
+        result = run(args, **kwargs)
+        if result.returncode:
+            raise RuntimeError(diagnostic_tail(f'{" ".join(args)}: {result.stderr or result.stdout}'))
+        return result.stdout.strip()
+
+    def load(self):
+        if not self.ledger.exists():
+            return {'schema': 1, 'apps': {}}
+        return json.loads(self.ledger.read_text())
+
+    @staticmethod
+    def write(path, data):
+        """Leave identical files alone, otherwise replace atomically."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.read_bytes() == data:
+            return False
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(data)
+            temporary.chmod(0o644)
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return True
+
+    def save(self, ledger):
+        self.write(self.ledger, (json.dumps(ledger, indent=2) + '\n').encode())
+
+    def app(self, app_id, directory=None):
+        # IDs are folder names, never paths supplied by the caller.
+        if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', app_id):
+            raise ValueError(f'invalid app id: {app_id}')
+        entry = self.load()['apps'].get(app_id, {})
+        directory = Path(directory or entry.get('dir') or self.root / ('hub' if app_id == 'hub' else f'apps/{app_id}'))
+        if not directory.exists() and (self.root / f'examples/{app_id}').is_dir():
+            directory = self.root / f'examples/{app_id}'
+        with (directory / 'app.toml').open('rb') as stream:
+            manifest = tomllib.load(stream)
+        for key in ('label', 'icon', 'port'):
+            if key not in manifest:
+                raise ValueError(f'{app_id}: missing {key}')
+        return directory, manifest
+
+    def environment(self, app_id, directory, manifest, apps):
+        owner, fqdn = self.identity()
+        values = {
+            'ROOT': self.root, 'APP_ID': app_id, 'APP_DIR': directory,
+            'PORT': manifest['port'], 'SHARE': self.root / 'share',
+            'STATE': self.root / 'state',
+            'OWNER': owner, 'FQDN': fqdn,
+        }
+        environment = {f'STATIONDESK_{key}': str(value)
+                       for key, value in values.items()}
+        for other_id in apps:
+            if apps[other_id].get('kind') == 'link':
+                continue
+            _, other = self.app(other_id)
+            key = other_id.upper().replace('-', '_')
+            environment[f'STATIONDESK_PORT_{key}'] = str(other['port'])
+        key = app_id.upper().replace('-', '_')
+        environment[f'STATIONDESK_PORT_{key}'] = str(manifest['port'])
+        return environment
+
+    def company(self, url=None):
+        box = self.root / 'state/box.toml'
+        content = box.read_text() if box.exists() else ''
+        # company is a top-level box setting. Preserve all other keys and tables.
+        sections = re.split(r'(?m)^(?=[ \t]*\[)', content, maxsplit=1)
+        top, tables = sections[0], sections[1] if len(sections) > 1 else ''
+        top = re.sub(r'^[ \t]*company[ \t]*=.*(?:\n|$)', '', top, flags=re.MULTILINE)
+        if url:
+            url = url.rstrip('/') + '/'
+            self.company_fetch(url)
+            top = 'company = ' + json.dumps(url) + '\n' + top
+        self.write(box, (top + tables).encode())
+        self.project()
+
+    def company_fetch(self, url=None):
+        try:
+            Catalog(self.root).fetch(url)
+        except (OSError, ValueError, KeyError) as error:
+            raise RuntimeError(f'회사 배포 장소에서 앱 목록(index.json)을 받지 못했습니다. 회사 tailnet 연결과 주소를 확인해 주세요. {error}') from error
+
+    def company_add(self, app_id):
+        """Install the index's current bundle: fetch the index, download, compare sha256, unpack, install.
+
+        The index is fetched first because a new build replaces the previous bundles."""
+        self.company_fetch()
+        catalog = Catalog(self.root)
+        row = catalog.apps()[app_id]
+        name = f'{app_id}-{row["version"]}'
+        if not re.fullmatch(r'[a-z0-9][a-z0-9.-]*', name):
+            raise ValueError(f'invalid bundle name: {name}')
+        directory = catalog.directory / 'apps' / name
+        if not (directory / 'app.toml').is_file():
+            self.unpack(catalog.url + name + '.tar.gz', row['sha256'], directory)
+        previous = self.load()['apps'].get(app_id, {}).get('dir')
+        self.install(app_id, directory, 'company', version=row['version'])
+        if previous and Path(previous) != directory and Path(previous).parent == directory.parent:
+            self.safe_remove(previous)
+
+    def unpack(self, url, sha256, directory):
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix='.unpack-', dir=directory.parent))
+        try:
+            archive = staging / 'bundle.tar.gz'
+            digest = hashlib.sha256()
+            try:
+                with urllib.request.urlopen(url, timeout=60) as response, archive.open('wb') as stream:
+                    while chunk := response.read(1024 * 1024):
+                        digest.update(chunk)
+                        stream.write(chunk)
+            except OSError as error:
+                raise RuntimeError(f'묶음을 받지 못했습니다 ({url}): {error}') from error
+            if digest.hexdigest() != sha256:
+                raise RuntimeError(f'묶음의 sha256 이 목록과 다릅니다 ({url}). 배포 박스에서 다시 build 한 뒤 목록을 새로 받아 주세요.')
+            with tarfile.open(archive) as bundle:
+                bundle.extractall(staging / 'app', filter='tar')
+            (staging / 'app').rename(directory)
+        finally:
+            self.safe_remove(staging)
+
+    def company_link(self, app_id, visible):
+        catalog = Catalog(self.root)
+        row = catalog.links()[app_id]
+        parsed = urlsplit(row['url'])
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            raise ValueError('회사 링크 주소는 http:// 또는 https:// 이어야 합니다.')
+        if app_id in self.load()['apps']:
+            raise ValueError(f'{app_id}: already installed from another source')
+        state = self.root / 'state/company-links.json'
+        shown = set(json.loads(state.read_text()) if state.exists() else [])
+        if visible:
+            shown.add(app_id)
+        else:
+            shown.discard(app_id)
+        self.write(state, (json.dumps(sorted(shown)) + '\n').encode())
+        self.project()
+
+    def add(self, source):
+        if source.startswith('company:'):
+            return self.company_add(source.removeprefix('company:'))
+        previous = self.load()['apps'].get(source)
+        if previous and previous.get('origin') == 'company':
+            # Re-adding reinstalls the unpacked bundle; `update` moves to the index's version.
+            return self.install(source)
+        if re.fullmatch(r'[a-z0-9][a-z0-9-]*', source) and (source == 'hub' or (self.root / 'apps' / source / 'app.toml').is_file() or (self.root / 'examples' / source / 'app.toml').is_file()):
+            return self.install(source)
+        path = Path(source).expanduser()
+        if path.is_dir() and ((path / 'app.toml').is_file() or (path / 'apps').is_dir()):
+            return self.add_source(path.resolve(), str(path.resolve()))
+        if ':' in source or '/' in source or path.is_dir():
+            url, separator, ref = source.partition('#')
+            name = Path(url.rstrip('/')).name.removesuffix('.git')
+            clone_id = re.sub('[^a-z0-9-]', '-', name.lower()).strip('-') or 'addon'
+            clone_id += '-' + hashlib.sha256(source.encode()).hexdigest()[:10]
+            directory = self.root / 'addons' / clone_id
+            created = not directory.exists()
+            if created:
+                directory.parent.mkdir(parents=True, exist_ok=True)
+                self.command(['git', 'clone', '--', url, str(directory)])
+                if separator:
+                    try:
+                        self.command(['git', 'checkout', ref], cwd=directory)
+                    except (OSError, RuntimeError):
+                        self.safe_remove(directory)
+                        raise
+            try:
+                return self.add_source(directory, source, str(directory), ref)
+            except (OSError, ValueError, KeyError, RuntimeError):
+                if created and not any(e.get('repo') == str(directory) for e in self.load()['apps'].values()):
+                    self.safe_remove(directory)
+                raise
+        return self.install(source)
+
+    def add_source(self, directory, origin, repo=None, ref=''):
+        directories = ([directory] if (directory / 'app.toml').is_file() else
+                       sorted(p.parent for p in (directory / 'apps').glob('*/app.toml')))
+        if not directories:
+            raise ValueError(f'{directory}: no app.toml or apps/<id>/app.toml')
+        failures = []
+        for app in directories:
+            app_id = app.name
+            if app == directory and repo:
+                app_id = Path(origin.partition('#')[0].rstrip('/')).name.removesuffix('.git')
+            try:
+                self.install(app_id, app, origin, repo, ref)
+            except (OSError, ValueError, KeyError, RuntimeError) as error:
+                failures.append(diagnostic_tail(f'{app_id}: {error}'))
+        if failures:
+            raise RuntimeError('\n'.join(failures))
+
+    def artifact_content(self, artifacts):
+        """Compare owned installation bytes, ignoring timestamps and rewrites."""
+        content = {}
+        for artifact in artifacts:
+            path = (self.unit_dir / artifact['name'] if artifact['kind'] == 'unit'
+                    else Path(artifact['path']))
+            if path.is_file():
+                with path.open('rb') as stream:
+                    content[path] = hashlib.file_digest(stream, 'sha256').hexdigest()
+            elif path.is_dir():
+                content[path] = folder_digest(path)
+            else:
+                content[path] = None
+        return content
+
+    def ports(self, app_id, manifest, endpoints=()):
+        ports = {int(manifest['port'])}
+        if manifest.get('serve') and app_id != 'hub':
+            ports.update((int(manifest['serve']), int(manifest['port']) + 1))
+        if app_id == 'hub':
+            ports.add(443)
+        if app_id == 'devterm':
+            ports.add(int(manifest['port']) + 1)  # ttyd behind the terminal gate
+        for endpoint in endpoints:
+            ports.update((int(endpoint['https_port']), int(endpoint['gate_port'])))
+        return ports
+
+    def check_ports(self, app_id, manifest, apps):
+        wanted = self.ports(app_id, manifest)
+        for other_id, entry in apps.items():
+            if other_id == app_id or entry.get('kind') == 'link':
+                continue
+            # Older ledgers have no port: read their installed manifest once.
+            other = entry if 'port' in entry else self.app(other_id)[1]
+            overlap = wanted & self.ports(other_id, other, entry.get('endpoints', []))
+            if overlap:
+                raise ValueError(f'포트 {min(overlap)} 은 {other_id} 이 사용 중')
+
+    def install(self, app_id, directory=None, origin=None, repo=None, ref='', version=None):
+        ledger = self.load()
+        apps = ledger['apps']
+        previous = apps.get(app_id)
+        if previous and previous.get('kind') == 'link':
+            raise ValueError(f'{app_id}: already a link')
+        if previous and origin and previous.get('origin', 'builtin') != origin:
+            raise ValueError(f'{app_id}: already installed from {previous.get("origin", "builtin")}')
+        origin = origin or (previous or {}).get('origin', 'builtin')
+        repo = repo or (previous or {}).get('repo')
+        ref = ref or (previous or {}).get('ref', '')
+        version = version or (previous or {}).get('version')
+        directory, manifest = self.app(app_id, directory)
+        self.check_ports(app_id, manifest, apps)
+        environment = self.environment(app_id, directory, manifest, apps)
+        units = {}
+        active_units = set()
+        for source in sorted((directory / 'units').glob('*')):
+            if source.suffix not in ('.service', '.timer'):
+                continue
+            content = source.read_text()
+            if source.suffix == '.service':
+                content += '\n[Unit]\nOnFailure=stationdesk-alarm@%n.service\n'
+                # A separate section also works when the template already has [Service].
+                content += '\n[Service]\n'
+                card = str(self.root / 'bin/stationdesk-card').replace('%', '%%')
+                content += (f'ExecStartPost=-{card} --group "unit:%n" --title "App unit active: %n" --resolves\n'
+                            f'ExecStopPost=-{card} --unit-result "%n"\n')
+                # Other apps appearing later must not rewrite or restart this unit.
+                own_port = 'STATIONDESK_PORT_' + app_id.upper().replace('-', '_')
+                for key, value in environment.items():
+                    if key.startswith('STATIONDESK_PORT_') and key != own_port:
+                        continue
+                    quoted = value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
+                    content += f'Environment="{key}={quoted}"\n'
+            install_section = re.search(r'(?ms)^\[Install\]\s*\n(.*?)(?=^\[|\Z)', content)
+            if ('@.' not in source.name and install_section
+                    and re.search(r'(?m)^[ \t]*WantedBy[ \t]*=[ \t]*\S+', install_section.group(1))):
+                active_units.add(source.name)
+            units[self.unit_dir / source.name] = content.encode()
+        units_changed = any(not path.exists() or path.read_bytes() != content
+                            for path, content in units.items())
+        artifacts = []
+        copies = []
+        for path in units:
+            artifacts.append({'kind': 'unit', 'name': path.name, 'enabled': path.name in active_units})
+        if (directory / 'web').is_dir():
+            target = self.root / 'web' / app_id
+            copies.append((directory / 'web', target))
+            artifacts.append({'kind': 'path', 'path': str(target)})
+        icon = directory / manifest['icon']
+        target = self.root / 'web' / app_id / f'icon{icon.suffix}'
+        copies.append((icon, target))
+        artifacts.append({'kind': 'path', 'path': str(target)})
+        if list((directory / 'nginx').glob('*.conf')):
+            artifacts.append({'kind': 'path', 'path': str(self.root / f'nginx/apps.d/{app_id}.conf')})
+        if manifest.get('serve') and app_id != 'hub':
+            artifacts.append({'kind': 'path', 'path': str(self.root / f'nginx/apps.d/{app_id}-serve.conf')})
+        links = []
+        for filename in manifest.get('files', []):
+            link = filename if isinstance(filename, dict) else None
+            path = Path(link['path'] if link else filename).expanduser()
+            if not path.is_absolute():
+                path = self.root / path
+            artifact = {'kind': 'path', 'path': str(path)}
+            if link:
+                target = str(directory / link['target'])
+                artifact['target'] = target
+                # Old ledgers recorded these links as unconditional paths.
+                # Give their retirement the same target ownership as new installs.
+                for old in (previous or {}).get('artifacts', []):
+                    if old.get('path') == str(path):
+                        old.setdefault('target', str(Path(previous['dir']) / link['target']))
+                owned_targets = {a.get('target') for a in (previous or {}).get('artifacts', [])
+                                 if a.get('path') == str(path)}
+                if path.is_symlink() and os.readlink(path) in owned_targets | {target}:
+                    pass
+                elif path.exists() or path.is_symlink():
+                    print(f'Existing user file preserved: {path}', file=sys.stderr)
+                    continue
+                links.append((path, target))
+            artifacts.append(artifact)
+        checkout = Path(repo) if repo else self.root
+        relative = directory.relative_to(checkout).as_posix() if origin == 'builtin' or repo else None
+        commit = (self.command(['git', 'rev-parse', 'HEAD'], cwd=checkout)
+                  if relative is not None else folder_digest(directory))
+        installer = directory / 'install.sh'
+        source_changed = True
+        if (previous and not units_changed
+                and all(a in previous['artifacts'] for a in artifacts)):
+            diff = (run(['git', 'diff', '--quiet', previous['commit'], 'HEAD', '--', relative],
+                        cwd=checkout) if relative is not None else
+                    subprocess.CompletedProcess([], int(previous['commit'] != commit), '', ''))
+            source_changed = diff.returncode != 0
+            if (diff.returncode == 0 and not installer.is_file()
+                    and all(path.is_symlink() for path, _ in links)
+                    and all(a in artifacts for a in previous['artifacts'] if 'target' in a)):
+                previous.update(dir=str(directory), origin=origin, kind='app', repo=repo, ref=ref)
+                if version:
+                    previous['version'] = version
+                self.save(ledger)
+                self.project()
+                return
+            if diff.returncode not in (0, 1):
+                raise RuntimeError(f'git diff: {diff.stderr.strip()}')
+        before = self.artifact_content(artifacts + (previous['artifacts'] if previous else []))
+        retired = [artifact for artifact in previous['artifacts']
+                   if artifact not in artifacts] if previous else []
+        removed = self.remove_artifacts(retired)
+        alarm_changed = self.alarm_unit()
+        for path, content in units.items():
+            self.write(path, content)
+        # Unchanged app sources already have their web/icon files installed.
+        # Leave them in place while the installer refreshes external inputs.
+        for source, target in copies if source_changed else []:
+            if source.is_dir():
+                if previous and {'kind': 'path', 'path': str(target)} in previous['artifacts']:
+                    self.safe_remove(target)
+                shutil.copytree(source, target, dirs_exist_ok=True)
+            else:
+                self.write(target, source.read_bytes())
+        for path, target in links:
+            if not path.is_symlink():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(target)
+        if installer.is_file():
+            self.command(['bash', str(installer)], cwd=directory, env=os.environ | environment,
+                         stderr=subprocess.STDOUT)
+        after = self.artifact_content(artifacts + retired)
+        changed = before != after
+        units_changed = units_changed or any(before.get(path) != after.get(path)
+                                            for path in before.keys() | after.keys()
+                                            if path.is_relative_to(self.unit_dir))
+        if units_changed or alarm_changed or any(a['kind'] == 'unit' for a in retired):
+            self.command(['systemctl', '--user', 'daemon-reload'])
+        for path in units:
+            if path.name not in active_units:
+                continue
+            self.command(['systemctl', '--user', 'enable', '--now', path.name])
+            if previous and (changed or source_changed):
+                self.command(['systemctl', '--user', 'restart', path.name])
+        # Keep ownership of nginx fragments until projection has removed them.
+        artifacts += [a for a in retired if a['kind'] == 'path'
+                      and Path(a['path']).parent == self.root / 'nginx/apps.d']
+        apps[app_id] = {'dir': str(directory), 'commit': commit,
+                        'origin': origin, 'kind': 'app', 'repo': repo, 'ref': ref,
+                        'port': manifest['port'], 'serve': manifest.get('serve'), 'artifacts': artifacts,
+                        'endpoints': (previous or {}).get('endpoints', [])}
+        if version:
+            apps[app_id]['version'] = version
+        self.save(ledger)
+        self.project(removed)
+
+    def alarm_unit(self):
+        card = str(self.root / 'bin/stationdesk-card').replace('%', '%%')
+        return self.write(self.unit_dir / 'stationdesk-alarm@.service', (
+            '[Unit]\nDescription=StationDesk failed app %i\n'
+            '[Service]\nType=oneshot\n'
+            f'Environment="STATIONDESK_ROOT={self.root}"\n'
+            f'ExecStart={card} --group "unit:%i" --level urgent '
+            '--title "App unit failed: %i" --peek\n').encode())
+
+    @staticmethod
+    def check_remove(path):
+        """G1: do not traverse symlink ancestors, including dangling links."""
+        path = Path(os.path.abspath(path))
+        if any(parent.is_symlink() for parent in path.parents):
+            raise ValueError(f'refusing symlink ancestor: {path}')
+        return path
+
+    def safe_remove(self, path):
+        path = self.check_remove(path)
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+
+    def remove_artifacts(self, artifacts):
+        paths = [(artifact, self.check_remove(
+            self.unit_dir / artifact['name'] if artifact['kind'] == 'unit'
+            else artifact['path'])) for artifact in artifacts]
+        # Check all ancestors before stopping a unit or deleting anything.
+        for artifact, path in paths:
+            if artifact['kind'] == 'unit' and '@.' not in artifact['name']:
+                self.command(['systemctl', '--user', 'stop', artifact['name']])
+                if artifact.get('enabled', True):
+                    self.command(['systemctl', '--user', 'disable', artifact['name']])
+            # project owns nginx changes so G2 can restore removed fragments too.
+            if path.parent != self.root / 'nginx/apps.d':
+                if 'target' not in artifact or (path.is_symlink()
+                        and os.readlink(path) == artifact['target']):
+                    self.safe_remove(path)
+        return [path.name for _, path in paths
+                if path.parent == self.root / 'nginx/apps.d']
+
+    def remove(self, app_id):
+        ledger = self.load()
+        entry = ledger['apps'][app_id]
+        artifacts = list(entry['artifacts'])
+        repo = entry.get('repo')
+        last_clone = repo and not any(key != app_id and other.get('repo') == repo
+                                      for key, other in ledger['apps'].items())
+        # An unpacked company bundle belongs to its one app.
+        bundle = (entry.get('origin') == 'company' and entry.get('dir')
+                  and Path(entry['dir']).parent == self.root / 'company/apps')
+        owned = repo if last_clone else entry['dir'] if bundle else None
+        if owned:
+            self.check_remove(owned)
+        removed = self.remove_artifacts(artifacts)
+        del ledger['apps'][app_id]
+        self.save(ledger)
+        try:
+            self.project(removed)
+            if self.identity()[1]:
+                for endpoint in entry.get('endpoints', []):
+                    self.unexpose(endpoint)
+            if entry.get('serve') and self.identity()[1]:
+                self.command(['tailscale', 'serve', f'--https={entry["serve"]}', 'off'])
+        except (OSError, RuntimeError):
+            # Other artifacts are gone; retain only restored nginx ownership for retry.
+            remaining = [a for a in entry['artifacts'] if a['kind'] == 'path'
+                         and Path(a['path']).parent == self.root / 'nginx/apps.d']
+            if remaining:
+                ledger['apps'][app_id] = dict(entry, artifacts=remaining)
+                self.save(ledger)
+            raise
+
+        if owned:
+            try:
+                self.safe_remove(owned)
+            except (OSError, ValueError):
+                # Keep ownership of the clone if its filesystem cleanup failed.
+                ledger['apps'][app_id] = dict(entry, artifacts=[])
+                self.save(ledger)
+                raise
+
+    def link_add(self, label, url):
+        parsed = urlsplit(url)
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            raise ValueError('link URL must be http:// or https://')
+        app_id = 'link-' + hashlib.sha256(label.encode()).hexdigest()[:12]
+        ledger = self.load()
+        ledger['apps'][app_id] = {'kind': 'link', 'label': label, 'url': url,
+                                  'origin': url, 'serve': None, 'artifacts': []}
+        self.save(ledger)
+        self.project()
+
+    def link_remove(self, label):
+        app_id = 'link-' + hashlib.sha256(label.encode()).hexdigest()[:12]
+        if label in self.load()['apps'] and self.load()['apps'][label].get('kind') == 'link':
+            app_id = label
+        self.remove(app_id)
+
+    @staticmethod
+    def tailscale_status():
+        if shutil.which('tailscale'):
+            result = run(['tailscale', 'status', '--json'])
+            if result.returncode == 0:
+                return json.loads(result.stdout)
+        return {}
+
+    def identity(self):
+        status = self.tailscale_status()
+        own = status.get('Self') or {}
+        owner = ((status.get('User') or {}).get(str(own.get('UserID')), {}).get('LoginName', '')
+                 or own.get('LoginName', ''))
+        if not owner and (self.root / 'state/box.toml').exists():
+            with (self.root / 'state/box.toml').open('rb') as stream:
+                owner = tomllib.load(stream).get('owner', '')
+        return owner, own.get('DNSName', '').rstrip('.')
+
+    def render_site(self, apps):
+        owner, _ = self.identity()
+        if not owner:
+            raise ValueError('owner unavailable: log in to Tailscale or set state/box.toml owner')
+        # JSON quoting is also valid for nginx quoted strings; escape nginx variables.
+        owner = json.dumps(owner).replace('$', r'\$')
+        _, hub = self.app('hub')
+        includes = '\n'.join(f'    include "{self.root}/nginx/apps.d/{app_id}.conf";'
+                             for app_id in apps
+                             if apps[app_id].get('kind') != 'link'
+                             and list((self.app(app_id)[0] / 'nginx').glob('*.conf')))
+        site = Template((self.root / 'nginx/site.tmpl').read_text()).substitute(
+            OWNER=owner, ROOT=self.root, PORT=hub['port'], INCLUDES=includes)
+        for app_id in apps:
+            if apps[app_id].get('kind') == 'link':
+                continue
+            _, manifest = self.app(app_id)
+            if manifest.get('serve') and app_id != 'hub':
+                site += (f'\nserver {{\n    listen 127.0.0.1:{manifest["port"] + 1};\n'
+                         f'    if ($http_tailscale_user_login != {owner}) {{ return 403; }}\n'
+                         f'    include "{self.root}/nginx/apps.d/{app_id}-serve.conf";\n}}\n')
+        for app_id, entry in apps.items():
+            if entry.get('kind') == 'link':
+                continue
+            for endpoint in self.endpoints(app_id):
+                # A funnel endpoint is public by design: its fragment decides what it serves.
+                gate = ('' if endpoint.get('funnel') else
+                        f'    if ($http_tailscale_user_login != {owner}) {{ return 403; }}\n')
+                site += (f'\nserver {{\n    listen 127.0.0.1:{endpoint["gate_port"]};\n{gate}'
+                         f'    include "{self.root}/nginx/apps.d/{app_id}-endpoint-{endpoint["gate_port"]}.conf";\n}}\n')
+        return site
+
+    def nginx_config(self):
+        state = self.root / 'state'
+        return (f'pid "{state}/nginx.pid";\nerror_log "{state}/nginx-error.log";\n'
+                'events {}\nhttp {\n    include /etc/nginx/mime.types;\n'
+                "    log_format publish_views '$time_iso8601\\t$request_uri\\t$status\\t$http_user_agent';\n"
+                f'    access_log "{state}/nginx-access.log";\n'
+                f'    client_body_temp_path "{state}/client_temp";\n'
+                f'    proxy_temp_path "{state}/proxy_temp";\n'
+                f'    fastcgi_temp_path "{state}/fastcgi_temp";\n'
+                f'    uwsgi_temp_path "{state}/uwsgi_temp";\n'
+                f'    scgi_temp_path "{state}/scgi_temp";\n'
+                f'    include "{self.root}/nginx/site.conf";\n}}\n')
+
+    def endpoints(self, app_id):
+        _, manifest = self.app(app_id)
+        source = manifest.get('endpoints')
+        if not source:
+            return []
+        path = self.root / 'state' / source
+        return json.loads(path.read_text()) if path.exists() else []
+
+    def expose(self, endpoint):
+        url = f'http://127.0.0.1:{endpoint["gate_port"]}'
+        if not endpoint.get('funnel'):
+            self.command(['tailscale', 'serve', '--bg', f'--https={endpoint["https_port"]}', url])
+            return
+        # Without the funnel and https node attributes `tailscale funnel` prints an approval
+        # URL and waits. Ask the node's capabilities first, so a blocked tailnet policy costs
+        # nothing; the app shows the admin link and a re-run retries.
+        caps = (self.tailscale_status().get('Self') or {}).get('CapMap') or {}
+        if not {'funnel', 'https'} <= set(caps):
+            print(f'funnel :{endpoint["https_port"]} blocked by tailnet policy; not enabled', file=sys.stderr)
+            return
+        try:
+            self.command(['tailscale', 'funnel', '--bg', f'--https={endpoint["https_port"]}', url],
+                         timeout=20, stdin=subprocess.DEVNULL)
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
+            print(f'funnel :{endpoint["https_port"]} not enabled: {error}', file=sys.stderr)
+
+    def unexpose(self, endpoint):
+        if not endpoint.get('funnel'):
+            self.command(['tailscale', 'serve', f'--https={endpoint["https_port"]}', 'off'])
+            return
+        # Never enabled (policy) is the same as retired; nothing to undo.
+        result = run(['tailscale', 'funnel', f'--https={endpoint["https_port"]}', 'off'])
+        if result.returncode:
+            print(f'funnel :{endpoint["https_port"]} off: {result.stderr.strip()}', file=sys.stderr)
+
+    def serve(self, apps=None):
+        apps = self.load()['apps'] if apps is None else apps
+        _, fqdn = self.identity()
+        if not fqdn:
+            return  # Offline smoke uses box.toml and loopback header probes.
+        _, hub = self.app('hub')
+        self.command(['tailscale', 'serve', '--bg', '--https=443',
+                      f'http://127.0.0.1:{hub["port"]}'])
+        for app_id, entry in apps.items():
+            if entry.get('kind') == 'link':
+                continue
+            for endpoint in self.endpoints(app_id):
+                self.expose(endpoint)
+            if entry.get('serve') and app_id != 'hub':
+                _, manifest = self.app(app_id)
+                self.command(['tailscale', 'serve', '--bg', f'--https={entry["serve"]}',
+                              f'http://127.0.0.1:{manifest["port"] + 1}'])
+
+    def update(self, app_id=None):
+        if app_id is not None:
+            self.app(app_id)
+        self.command(['git', 'fetch'], cwd=self.root, timeout=30)
+        self.command(['git', 'merge', '--ff-only', '@{u}'], cwd=self.root)
+        apps = self.load()['apps']
+        selected = {key: entry for key, entry in apps.items() if app_id is None or key == app_id}
+        repos = {entry['repo']: entry.get('ref', '') for entry in selected.values() if entry.get('repo')}
+        company = [key for key, entry in selected.items() if entry.get('origin') == 'company']
+        if Catalog(self.root).enabled and app_id is None and not company:
+            self.company_fetch()  # links follow the index even with no company app installed
+        for repo, ref in repos.items():
+            self.command(['git', 'fetch', 'origin'], cwd=repo)
+            tracking = run(['git', 'rev-parse', '--abbrev-ref', '@{u}'], cwd=repo)
+            self.command(['git', 'merge', '--ff-only', '@{u}' if tracking.returncode == 0 else ref], cwd=repo)
+        # A checkout advances as a unit: its installed apps must use the same version.
+        selected.update({key: entry for key, entry in apps.items() if entry.get('repo') in repos})
+        if not Catalog(self.root).enabled:
+            company = []  # disconnected: company apps reinstall the bundle they have
+        result = self.batch('add', [key for key, entry in selected.items()
+                                    if entry.get('kind') != 'link' and key not in company])
+        if company:
+            result |= self.batch('company_add', company)
+        # The engine itself may change with no app change; re-project so hub/nginx/facts follow it.
+        self.project()
+        return result
+
+    def doctor(self):
+        apps = self.load()['apps']
+        checked, failed = 0, 0
+        owner, fqdn = self.identity()
+        for app_id in apps:
+            if apps[app_id].get('kind') == 'link':
+                continue
+            directory, manifest = self.app(app_id)
+            environment = os.environ | self.environment(app_id, directory, manifest, apps)
+            probes = []
+            if (directory / 'smoke.sh').is_file():
+                probes.append(('smoke', ['bash', str(directory / 'smoke.sh')]))
+            _, hub = self.app('hub')
+            url = f'http://127.0.0.1:{hub["port"]}' + ('/' if app_id == 'hub' else f'/{app_id}/')
+            for label, headers, expected in (
+                    ('owner', ['-H', f'Tailscale-User-Login: {owner}'], '200'),
+                    ('other', ['-H', f'Tailscale-User-Login: other-{owner}'], '403'),
+                    ('anonymous', [], '403')):
+                probes.append((label, ['curl', '-sSL', '--max-time', '10', '-o', '/dev/null',
+                                      '-w', '%{http_code}', *headers, url], expected))
+            if manifest.get('serve') and app_id != 'hub':
+                gate = f'http://127.0.0.1:{manifest["port"] + 1}/'
+                for label, headers, expected in (
+                        ('root-owner', ['-H', f'Tailscale-User-Login: {owner}'], '200'),
+                        ('root-other', ['-H', f'Tailscale-User-Login: other-{owner}'], '403'),
+                        ('root-anonymous', [], '403')):
+                    # Follow redirects like the hub probe: Orca's root redirects the owner.
+                    probes.append((label, ['curl', '-sSL', '--max-time', '10', '-o', '/dev/null',
+                                          '-w', '%{http_code}', *headers, gate], expected))
+            for endpoint in self.endpoints(app_id):
+                gate = f'http://127.0.0.1:{endpoint["gate_port"]}/'
+                if endpoint.get('funnel'):
+                    # Public by design: no owner gate. Whether the tailnet policy lets Funnel
+                    # through is shown by the app, so only the local listener is probed.
+                    probes.append((f'endpoint-{endpoint["https_port"]}-public',
+                                   ['curl', '-sS', '--max-time', '10', '-o', '/dev/null',
+                                    '-w', '%{http_code}', gate + 'robots.txt'], '200'))
+                    continue
+                for label, headers, expected in (
+                        ('owner', ['-H', f'Tailscale-User-Login: {owner}'], '200'),
+                        ('other', ['-H', f'Tailscale-User-Login: other-{owner}'], '403'),
+                        ('anonymous', [], '403')):
+                    probes.append((f'endpoint-{endpoint["https_port"]}-{label}',
+                                   ['curl', '-sS', '--max-time', '10', '-o', '/dev/null',
+                                    '-w', '%{http_code}', *headers, gate], expected))
+                if fqdn:
+                    probes.append((f'endpoint-{endpoint["https_port"]}-serve',
+                                   ['curl', '-fSs', '--max-time', '10', '-o', '/dev/null',
+                                    f'https://{fqdn}:{endpoint["https_port"]}/']))
+            if fqdn:
+                port = f':{manifest["serve"]}' if manifest.get('serve') else ''
+                path = '/' if app_id == 'hub' or port else f'/{app_id}/'
+                probes.append(('serve', ['curl', '-fSs', '--max-time', '10',
+                                         '-o', '/dev/null', f'https://{fqdn}{port}{path}']))
+            for label, command, *expected in probes:
+                checked += 1
+                result = run(command, cwd=directory, env=environment)
+                ok = result.returncode == 0 and (not expected or result.stdout == expected[0])
+                failed += not ok
+                print(f'{app_id} {label}: {"OK" if ok else "FAIL"}')
+                if not ok:
+                    print(result.stderr.strip() or result.stdout, file=sys.stderr)
+        print(f'확인 {checked} · 실패 {failed}')
+        return int(checked == 0 or failed > 0)
+
+    def project(self, removed=()):
+        ledger = self.load()
+        apps = dict(ledger['apps'])
+        # One app whose source folder vanished must not stop every other app's
+        # projection — including the remove that would clean it up.
+        for app_id, entry in list(apps.items()):
+            if entry.get('kind') == 'link':
+                continue
+            try:
+                self.app(app_id)
+            except OSError as error:
+                print(f'{app_id}: 원본 폴더가 없어 화면 연결에서 뺍니다 — '
+                      f'stationdesk remove {app_id} 또는 다시 설치 ({error})', file=sys.stderr)
+                del apps[app_id]
+        catalog = Catalog(self.root)
+        for app_id, icon in catalog.link_icons().items():
+            self.write(self.root / 'web/hub/assets/company-links' / (app_id + icon.suffix), icon.read_bytes())
+        for app_id, link in catalog.visible_links().items():
+            if app_id not in apps:
+                apps[app_id] = dict(kind='link', label=link['name'], url=link['url'], icon=link.get('icon', ''),
+                                    origin='company', serve=None, artifacts=[],
+                                    glyph=link.get('glyph', ''), badge_url=link.get('badge_url', ''))
+        fragments = {}
+        retired_endpoints = []
+        tiles = []
+        for app_id, entry in apps.items():
+            if entry.get('kind') == 'link':
+                tiles.append({'id': app_id, 'kind': 'link', 'label': entry['label'],
+                              'url': entry['url'], 'icon': entry.get('icon', ''),
+                              'origin': entry['origin'], 'serve': None,
+                              'glyph': entry.get('glyph', ''), 'badge_url': entry.get('badge_url', '')})
+                continue
+            directory, manifest = self.app(app_id)
+            sources = sorted((directory / 'nginx').glob('*.conf'))
+            environment = self.environment(app_id, directory, manifest, apps)
+            endpoints = self.endpoints(app_id)
+            current_ports = {endpoint['https_port'] for endpoint in endpoints}
+            retired_endpoints.extend(endpoint for endpoint in entry.get('endpoints', [])
+                                     if endpoint['https_port'] not in current_ports)
+            for endpoint in endpoints:
+                name = f'{app_id}-endpoint-{endpoint["gate_port"]}.conf'
+                source = self.root / 'state' / endpoint['fragment']
+                fragments[name] = Template(source.read_text()).safe_substitute(environment).encode()
+            if sources:
+                fragments[f'{app_id}.conf'] = '\n'.join(
+                    Template(p.read_text()).safe_substitute(environment)
+                    for p in sources if p.name != 'serve.conf').encode()
+            if manifest.get('serve') and app_id != 'hub':
+                source = directory / 'nginx/serve.conf'
+                content = (source.read_text() if source.exists() else
+                           'location / { proxy_pass http://127.0.0.1:${STATIONDESK_PORT}; }')
+                fragments[f'{app_id}-serve.conf'] = Template(content).safe_substitute(environment).encode()
+            icon = f'/{app_id}/icon{Path(manifest["icon"]).suffix}'
+            tiles.append({'id': app_id, 'kind': 'app', 'origin': entry.get('origin', 'builtin'),
+                          'label': manifest['label'], 'icon': icon,
+                          'port': manifest['port'], 'serve': entry['serve'],
+                          'path': '/' if app_id == 'hub' or (entry['serve'] and app_id != 'publish') else f'/{app_id}/'})
+        destination = self.root / 'nginx/apps.d'
+        destination.mkdir(parents=True, exist_ok=True)
+        owned = {Path(a['path']).name for entry in apps.values()
+                 for a in entry['artifacts'] if a['kind'] == 'path'
+                 and Path(a['path']).parent == destination}
+        removed = (set(removed) | owned) - fragments.keys()
+        for name in removed - fragments.keys():
+            self.check_remove(destination / name)
+        previous = {p.name: p.read_bytes() for p in destination.glob('*.conf')}
+        site = self.root / 'nginx/site.conf'
+        config = self.root / 'state/nginx.conf'
+        rendered = self.render_site(apps).encode()
+        previous_configs = {p: p.read_bytes() if p.exists() else None for p in (site, config)}
+        try:
+            self.write(site, rendered)
+            self.write(config, self.nginx_config().encode())
+            for name, content in fragments.items():
+                self.write(destination / name, content)
+            for name in set(removed) - fragments.keys():
+                (destination / name).unlink(missing_ok=True)
+            self.command(['nginx', '-t', '-c', str(config)])
+        except (OSError, RuntimeError):
+            for path, content in previous_configs.items():
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    self.write(path, content)
+            for name in fragments.keys() - previous.keys():
+                (destination / name).unlink(missing_ok=True)
+            for name, content in previous.items():
+                self.write(destination / name, content)
+            raise
+        unit = self.unit_dir / 'stationdesk-nginx.service'
+        changed = self.write(unit, (
+            '[Unit]\nDescription=StationDesk nginx\nStartLimitBurst=5\n'
+            '[Service]\nType=forking\nPIDFile=' + str(self.root / 'state/nginx.pid') + '\n'
+            'ExecStart=/usr/sbin/nginx -c ' + str(config) + '\n'
+            'Restart=always\nRestartSec=2\n[Install]\nWantedBy=default.target\n').encode())
+        if changed:
+            self.command(['systemctl', '--user', 'daemon-reload'])
+        self.command(['systemctl', '--user', 'enable', '--now', unit.name])
+        self.command(['nginx', '-s', 'reload', '-c', str(config)])
+        self.serve(apps)
+        if self.identity()[1]:
+            for endpoint in retired_endpoints:
+                self.unexpose(endpoint)
+        for app_id, entry in ledger['apps'].items():
+            if entry.get('kind') == 'link' or app_id not in apps:
+                continue
+            entry['endpoints'] = self.endpoints(app_id)
+            for endpoint in entry['endpoints']:
+                artifact = {'kind': 'path', 'path': str(destination / f'{app_id}-endpoint-{endpoint["gate_port"]}.conf')}
+                if artifact not in entry['artifacts']:
+                    entry['artifacts'].append(artifact)
+        self.write(self.root / 'web/hub/__stationdesk.json',
+                   (json.dumps(tiles, indent=2) + '\n').encode())
+        _, fqdn = self.identity()
+        hub_apps = {}
+        for tile in tiles:
+            app_id = tile['id']
+            own_icon = ('/assets/app-icons/' + app_id + ('.svg' if app_id == 'cad' else '.png')
+                        if app_id in ('devterm', 'fileview', 'publish', 'dev-monitor', 'paseo', 'cad', 'bench') else tile['icon'])
+            label = tile['label']
+            entry = apps[app_id]
+            hub_apps[app_id] = {'audience': 'owner', 'source_class': ('company' if entry.get('origin') == 'company' else 'link' if entry.get('kind') == 'link' else 'addon' if entry.get('origin', 'builtin') != 'builtin' else 'builtin'), 'link': entry.get('kind') == 'link', 'external': entry.get('kind') == 'link',
+                                'tile': {'label': label, 'path': tile.get('path', tile.get('url')), 'icon': own_icon,
+                                         'glyph': tile.get('glyph', ''), 'badge_url': tile.get('badge_url', '')}}
+            if tile['serve'] and app_id not in ('hub', 'publish'):
+                hub_apps[app_id]['port'] = tile['serve']
+        self.write(self.root / 'web/hub/__stationdesk-hub.json',
+                   (json.dumps({'product': 'StationDesk', 'fqdn': fqdn, 'apps': hub_apps}, indent=2) + '\n').encode())
+        owner, _ = self.identity()
+        self.write(self.root / 'web/hub/__owner.json',
+                   (json.dumps({'email': owner}) + '\n').encode())
+        self.box_facts(tiles)
+        configure = self.root / 'agents/configure.py'
+        if configure.exists():
+            result = run([sys.executable, str(configure), str(self.root)])
+            if result.stderr:
+                print(result.stderr.strip(), file=sys.stderr)
+        for entry in apps.values():
+            entry['artifacts'] = [a for a in entry['artifacts']
+                                  if not (a['kind'] == 'path'
+                                          and Path(a['path']).parent == destination
+                                          and Path(a['path']).name in removed)]
+        self.save(ledger)
+
+    def box_facts(self, tiles):
+        _, fqdn = self.identity()
+        host = fqdn or 'localhost'
+        lines = ['# StationDesk box',
+                 'This is a remote server. Share browser links with the person using this box.',
+                 '사람에게 알릴 일: `stationdesk-card --group <id> --title <message>`.',
+                 '| App | URL |', '| --- | --- |']
+        for tile in tiles:
+            if tile.get('kind') == 'link':
+                lines.append(f'| {tile["label"]} | {tile["url"]} |')
+                continue
+            port = f':{tile["serve"]}' if tile['serve'] and tile['id'] not in ('hub', 'publish') else ''
+            lines.append(f'| {tile["label"]} | https://{host}{port}{tile["path"]} |')
+        publish = next((tile for tile in tiles if tile['id'] == 'publish' and tile['serve']), None)
+        if publish:
+            lines.append(f'Share files: {self.root / "share"} → https://{host}:{publish["serve"]}/<filename>')
+        self.write(self.root / 'state/box-facts.md', ('\n'.join(lines) + '\n').encode())
+
+    def list(self):
+        apps = self.load()['apps']
+        for entry in apps.values():
+            entry['units'] = {
+                artifact['name']: run(['systemctl', '--user', 'is-active', artifact['name']]).stdout.strip()
+                for artifact in entry['artifacts'] if artifact['kind'] == 'unit'
+            }
+        return apps
+
+    def batch(self, action, app_ids):
+        failures = []
+        for app_id in app_ids:
+            try:
+                getattr(self, action)(app_id)
+            except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as error:
+                failures.append(diagnostic_tail(f'{app_id}: {error}'))
+        if failures:
+            print('\n'.join(failures), file=sys.stderr)
+        return int(bool(failures))
+
+
+def escape_app_cgroup():
+    """G3: a transient sibling survives restarting the caller's app unit."""
+    cgroup = Path('/proc/self/cgroup').read_text()
+    # The store has already placed the CLI in a sibling oneshot. Keep its
+    # output in that unit's journal, which the store uses for progress/errors.
+    if re.search(r'/stationdesk-store-[a-f0-9]{32}\.service(?:/|$)', cgroup):
+        return None
+    if re.search(r'/stationdesk-[^/]+\.service(?:/|$)', cgroup, re.MULTILINE):
+        return subprocess.run([
+            'systemd-run', '--user', '--collect', '--wait', '--pipe',
+            sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
+            env=os.environ).returncode
+    return None
+
+
+@contextmanager
+def mutation_lock(root):
+    state = Path(root) / 'state'
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / 'engine.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def main():
+    escaped = escape_app_cgroup()
+    if escaped is not None:
+        return escaped
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    for action in ('add', 'remove'):
+        commands.add_parser(action).add_argument('ids', nargs='+')
+    commands.add_parser('list').add_argument('--json', action='store_true')
+    for action in ('project', 'doctor'):
+        commands.add_parser(action)
+    company = commands.add_parser('company').add_mutually_exclusive_group(required=True)
+    company.add_argument('url', nargs='?')
+    company.add_argument('--off', action='store_true')
+    company_link = commands.add_parser('company-link')
+    company_link.add_argument('id')
+    visibility = company_link.add_mutually_exclusive_group(required=True)
+    visibility.add_argument('--show', action='store_true')
+    visibility.add_argument('--hide', action='store_true')
+    commands.add_parser('update').add_argument('app_id', nargs='?')
+    links = commands.add_parser('link').add_subparsers(dest='link_command', required=True)
+    link_add = links.add_parser('add')
+    link_add.add_argument('label')
+    link_add.add_argument('url')
+    links.add_parser('remove').add_argument('label')
+    args = parser.parse_args()
+    engine = Engine(Path(__file__).resolve().parent.parent)
+    lock = mutation_lock(engine.root) if args.command in ('add', 'remove', 'update', 'project', 'link', 'company', 'company-link') else nullcontext()
+    with lock:
+        return execute(args, engine)
+
+
+def execute(args, engine):
+    if args.command in ('add', 'remove'):
+        return engine.batch(args.command, args.ids)
+    try:
+        if args.command == 'company':
+            engine.company(None if args.off else args.url)
+            return 0
+        if args.command == 'company-link':
+            engine.company_link(args.id, args.show)
+            return 0
+        if args.command == 'link':
+            if args.link_command == 'add':
+                engine.link_add(args.label, args.url)
+            else:
+                engine.link_remove(args.label)
+            return 0
+        if args.command == 'update':
+            return engine.update(args.app_id)
+        if args.command == 'doctor':
+            return engine.doctor()
+        if args.command == 'project':
+            engine.project()
+        else:
+            apps = engine.list()
+            if args.json:
+                print(json.dumps(apps, indent=2))
+            else:
+                for app_id, entry in apps.items():
+                    states = ', '.join(f'{name}={state}' for name, state in entry['units'].items())
+                    print(f'{app_id}\t{states or "no units"}')
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(diagnostic_tail(error), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

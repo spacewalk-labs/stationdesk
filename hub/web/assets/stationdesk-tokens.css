@@ -1,0 +1,122 @@
+/* StationDesk design tokens. O3 ink, cream and orange; light follows the system or explicit theme. */
+:root {
+  --stationdesk-accent: #E4572E;
+  color-scheme: dark;
+  --stationdesk-canvas:      #1F2937;
+  --stationdesk-surface-1:   #263244;
+  --stationdesk-surface-2:   #303E51;
+  --stationdesk-hairline:    #465366;
+  --stationdesk-ink:         #F5F0E8;
+  --stationdesk-body:        #DDD7CE;
+  --stationdesk-mute:        #B2B6BD;
+  --stationdesk-primary:     #F5F0E8;
+  --stationdesk-on-primary:  #1F2937;
+  --stationdesk-warning:     #ffb340;
+  --stationdesk-danger:      #ff6961;
+  --stationdesk-line:        #30d158;
+  --stationdesk-edge:         rgba(255, 255, 255, .10);
+  --stationdesk-shadow:       0 3px 10px -2px rgba(0, 0, 0, .55),
+                          0 0 0 1px rgba(255, 255, 255, .06);
+  --stationdesk-shadow-hover: 0 10px 20px -5px rgba(0, 0, 0, .60),
+                          0 0 0 1px rgba(255, 255, 255, .08);
+  --stationdesk-focus:        0 0 0 3px rgba(228, 87, 46, .30);
+  --stationdesk-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                  "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+  --stationdesk-font-mono: "SF Mono", SFMono-Regular, "JetBrains Mono",
+                       "Cascadia Code", Consolas, D2Coding, monospace;
+  --stationdesk-fs-body:  17px;
+  --stationdesk-fs-lg:    20px;
+  --stationdesk-fs-sm:    15px;
+  --stationdesk-fs-xs:    13px;
+  --stationdesk-fs-h1:    28px;
+  --stationdesk-fs-h2:    21px;
+  --stationdesk-lh:         1.5;
+  --stationdesk-track:      -0.022em;
+  --stationdesk-track-caps: 0.04em;
+  --stationdesk-fw-regular:  400;
+  --stationdesk-fw-medium:   500;
+  --stationdesk-fw-semibold: 600;
+  --stationdesk-fw-bold:     700;
+  --stationdesk-r-sm:   8px;
+  --stationdesk-r-md:   12px;
+  --stationdesk-r-lg:   14px;
+  --stationdesk-r-tile: 15px;
+  --stationdesk-r-pill: 999px;
+  --stationdesk-sp-1:  4px;
+  --stationdesk-sp-2:  8px;
+  --stationdesk-sp-3:  12px;
+  --stationdesk-sp-4:  16px;
+  --stationdesk-sp-5:  20px;
+  --stationdesk-sp-6:  24px;
+  --stationdesk-sp-8:  32px;
+  --stationdesk-sp-12: 48px;
+  --stationdesk-page: 1160px;
+  --stationdesk-ease:     cubic-bezier(.2, .8, .2, 1);
+  --stationdesk-dur-fast: 160ms;
+  --stationdesk-dur-slow: 250ms;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --stationdesk-canvas:     #F5F5F7;
+    --stationdesk-surface-1:  #FFFFFF;
+    --stationdesk-surface-2:  #E8E8ED;
+    --stationdesk-hairline:   #D2D2D7;
+    --stationdesk-ink:        #1F2937;
+    --stationdesk-body:       #374151;
+    --stationdesk-mute:       #626874;
+    --stationdesk-primary:    #1F2937;
+    --stationdesk-on-primary: #F5F5F7;
+    --stationdesk-warning:    #9a6700;
+    --stationdesk-danger:     #cf222e;
+    --stationdesk-line:       #28a745;
+    --stationdesk-edge:         rgba(0, 0, 0, .06);
+    --stationdesk-shadow:       0 3px 8px -2px rgba(0, 0, 0, .20),
+                            0 1px 2px rgba(0, 0, 0, .10);
+    --stationdesk-shadow-hover: 0 9px 18px -5px rgba(0, 0, 0, .28),
+                            0 2px 5px rgba(0, 0, 0, .12);
+    --stationdesk-focus:        0 0 0 3px rgba(228, 87, 46, .30);
+  }
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --stationdesk-canvas:     #F5F5F7;
+  --stationdesk-surface-1:  #FFFFFF;
+  --stationdesk-surface-2:  #E8E8ED;
+  --stationdesk-hairline:   #D2D2D7;
+  --stationdesk-ink:        #1F2937;
+  --stationdesk-body:       #374151;
+  --stationdesk-mute:       #626874;
+  --stationdesk-primary:    #1F2937;
+  --stationdesk-on-primary: #F5F5F7;
+  --stationdesk-warning:    #9a6700;
+  --stationdesk-danger:     #cf222e;
+  --stationdesk-line:       #28a745;
+  --stationdesk-edge:         rgba(0, 0, 0, .06);
+  --stationdesk-shadow:       0 3px 8px -2px rgba(0, 0, 0, .20),
+                          0 1px 2px rgba(0, 0, 0, .10);
+  --stationdesk-shadow-hover: 0 9px 18px -5px rgba(0, 0, 0, .28),
+                          0 2px 5px rgba(0, 0, 0, .12);
+  --stationdesk-focus:        0 0 0 3px rgba(228, 87, 46, .30);
+}
+[data-theme="dark"] {
+  color-scheme: dark;
+  --stationdesk-canvas:     #1F2937;
+  --stationdesk-surface-1:  #263244;
+  --stationdesk-surface-2:  #303E51;
+  --stationdesk-hairline:   #465366;
+  --stationdesk-ink:        #F5F0E8;
+  --stationdesk-body:       #DDD7CE;
+  --stationdesk-mute:       #B2B6BD;
+  --stationdesk-primary:    #F5F0E8;
+  --stationdesk-on-primary: #1F2937;
+  --stationdesk-warning:    #ffb340;
+  --stationdesk-danger:     #ff6961;
+  --stationdesk-line:       #30d158;
+  --stationdesk-edge:         rgba(255, 255, 255, .10);
+  --stationdesk-shadow:       0 3px 10px -2px rgba(0, 0, 0, .55),
+                          0 0 0 1px rgba(255, 255, 255, .06);
+  --stationdesk-shadow-hover: 0 10px 20px -5px rgba(0, 0, 0, .60),
+                          0 0 0 1px rgba(255, 255, 255, .08);
+  --stationdesk-focus:        0 0 0 3px rgba(228, 87, 46, .30);
+}

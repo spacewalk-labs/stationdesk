@@ -1,0 +1,5 @@
+label = "Dev Monitor"
+description = "System status"
+description_ko = "시스템 상태"
+icon = "icon.svg"
+port = 19932

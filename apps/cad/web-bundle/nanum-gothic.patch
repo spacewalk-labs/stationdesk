@@ -1,0 +1,12 @@
+--- a/crates/fonts/build.rs
++++ b/crates/fonts/build.rs
+@@ -53,7 +53,8 @@
+             continue;
+         }
+         let arabic = scripts.split(',').any(|s| s.trim() == "Arab");
+-        let web_face = (*family == "BIZ UDPGothic" && *style == "Regular") || arabic;
++        let web_face = (*family == "BIZ UDPGothic" && *style == "Regular") || arabic
++            || (*family == "NanumGothic" && *style == "Regular");
+         if wasm && !web_face {
+             continue;
+         }

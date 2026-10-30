@@ -1,0 +1,10 @@
+[Unit]
+Description=StationDesk Orca loopback firewall and AppArmor profile
+After=network.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash ${STATIONDESK_APP_DIR}/guard.sh up
+ExecStop=/bin/bash ${STATIONDESK_APP_DIR}/guard.sh down
+[Install]
+WantedBy=default.target

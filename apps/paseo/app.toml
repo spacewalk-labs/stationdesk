@@ -1,0 +1,7 @@
+label = "Paseo"
+description = "Agent management"
+description_ko = "에이전트 관리"
+icon = "icon.svg"
+port = 19952
+serve = 19950
+files = ["runtime/paseo", "runtime/paseo-browse-host", "runtime/agy-acp", "state/paseo-ui-state", "~/.config/systemd/user/stationdesk-paseo.service.d"]

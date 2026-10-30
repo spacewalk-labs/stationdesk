@@ -1,0 +1,21 @@
+[Unit]
+Description=StationDesk Orca virtual display (:59)
+After=network.target
+StartLimitIntervalSec=30
+StartLimitBurst=3
+[Service]
+Type=simple
+# Orca is Electron and needs a real X display even headless. A standing display
+# avoids the socket race of a per-start xvfb-run ('Missing X server').
+# Never unlink this display's lock/socket here: another X server may own them,
+# and a conflict must fail loudly instead of damaging that runtime.
+# -extension GLX: with NVIDIA userspace EGL/GBM libs, Xvfb SIGSEGVs loading
+# libEGL_nvidia during GLX init. Orca renders with LIBGL_ALWAYS_SOFTWARE.
+ExecStart=/usr/bin/Xvfb :59 -screen 0 1280x1024x24 -nolisten tcp -extension GLX
+# active != socket-ready: poll for the socket so Orca's After= holds.
+ExecStartPost=/bin/sh -c 'for _ in $$(seq 1 100); do [ -S /tmp/.X11-unix/X59 ] && exit 0; sleep 0.1; done; exit 1'
+# Resource conflicts exit nonzero and must not loop; the measured GLX SIGSEGV may recover.
+Restart=on-abnormal
+RestartSec=2
+[Install]
+WantedBy=default.target

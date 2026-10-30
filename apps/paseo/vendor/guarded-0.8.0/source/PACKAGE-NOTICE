@@ -1,0 +1,14 @@
+Paseo 0.8.0 with StationDesk modifications
+
+Upstream: https://github.com/getpaseo/paseo
+Base commit: b8e24677e12b226c7c38c1c3a40649daa9f1152f (v0.8.0)
+Upstream portions remain Apache-2.0; see LICENSE-Paseo-Apache-2.0.
+StationDesk modifications are AGPL-3.0-only; see LICENSE-StationDesk-AGPL-3.0.
+Modified files carry a StationDesk notice. Other package and dependency licenses
+retain their own terms and copyright notices.
+
+Corresponding modification source, guard TypeScript, downstream editable patches,
+rebuild steps, tests, and the exact binary-input checksums are distributed in
+StationDesk's source snapshot at apps/paseo/vendor/guarded-0.8.0/source/ and
+apps/paseo/patches/:
+https://github.com/spacewalk-labs/stationdesk/tree/main/apps/paseo

@@ -1,0 +1,117 @@
+--- a/apps/cadcraft-web/src/host.rs
++++ b/apps/cadcraft-web/src/host.rs
+@@ -14,6 +14,10 @@
+ //! starts on the Start tab rather than an empty Drawing1, and the parent guards leaving the page.
+
+ use std::cell::{Cell, RefCell};
++use std::rc::Rc;
++
++use cadcraft_ui_egui::control::{ControlRequest, Outcome};
++use serde_json::{Value, json};
+
+ use cadcraft_ui_egui::CadApp;
+ use wasm_bindgen::JsCast as _;
+@@ -34,6 +38,8 @@
+     window: web_sys::Window,
+     parent: web_sys::Window,
+     origin: String,
++    requests: Rc<RefCell<Vec<(JsValue, Value)>>>,
++    document: Rc<Cell<Option<Option<u64>>>>,
+ }
+
+ /// The unsaved-changes state last reported to the parent.
+@@ -49,7 +55,7 @@
+             return None;
+         }
+         let origin = window.location().origin().ok()?;
+-        Some(Self { window, parent, origin })
++        Some(Self { window, parent, origin, requests: Rc::default(), document: Rc::default() })
+     }
+
+     /// Make this the bridge [`deliver`] uses.
+@@ -66,7 +72,8 @@
+     }
+
+     /// Hear drawings from the parent; they arrive through the upload inbox.
+-    pub fn listen(&self, inbox: crate::upload::Inbox) {
++    pub fn listen(&self, inbox: crate::upload::Inbox, ctx: egui::Context) {
++        let requests = self.requests.clone();
+         let parent = self.parent.clone();
+         let origin = self.origin.clone();
+         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+@@ -74,6 +81,16 @@
+                 return;
+             }
+             let data = event.data();
++            if string(&data, "type").as_deref() == Some("cadcraft:run") {
++                let id = js_sys::Reflect::get(&data, &"id".into()).unwrap_or(JsValue::NULL);
++                let request = js_sys::JSON::stringify(&data).ok()
++                    .and_then(|s| s.as_string())
++                    .and_then(|s| serde_json::from_str(&s).ok())
++                    .unwrap_or(Value::Null);
++                requests.borrow_mut().push((id, request));
++                ctx.request_repaint();
++                return;
++            }
+             if string(&data, "type").as_deref() != Some("cadcraft:open") {
+                 return;
+             }
+@@ -95,8 +112,36 @@
+         }
+     }
+
+-    /// After each frame: tell the parent when unsaved changes appear or go away.
++    /// Run queued control requests on the app's frame, without blocking wasm for a reply.
++    pub fn run_requests(&self, app: &mut CadApp, ctx: &egui::Context) {
++        for (id, request) in self.requests.take() {
++            let method = request.get("method").and_then(Value::as_str).unwrap_or("");
++            let params = request.get("params").cloned().unwrap_or(json!({}));
++            let (req, _pending) = ControlRequest::new(method, params);
++            let response = match cadcraft_ui_egui::control::handle(app, ctx, &req) {
++                Outcome::Done(value) => value,
++                _ => json!({"ok": false, "error": "not immediate"}),
++            };
++            let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
++            let value = response.get("result").cloned().unwrap_or(Value::Null);
++            let error = response.get("error").cloned().unwrap_or(Value::Null);
++            let payload = if ok { value } else { error };
++            let encoded = serde_json::to_string(&payload).unwrap_or_else(|_| "null".into());
++            let value = js_sys::JSON::parse(&encoded).unwrap_or(JsValue::NULL);
++            self.send(&[("type", "cadcraft:result".into()), ("id", id),
++                ("ok", ok.into()), (if ok { "value" } else { "error" }, value)]);
++        }
++    }
++
++    /// After each frame: report unsaved changes and the active document.
+     pub fn report_dirty(&self, app: &CadApp, reported: &DirtyReport) {
++        let document = if app.ui.start_tab { None } else { app.session.docs.get(app.session.active).map(|doc| doc.uid) };
++        if self.document.get() != Some(document)
++            && self.send(&[("type", "cadcraft:document".into()),
++                ("id", document.map(|id| JsValue::from_str(&id.to_string())).unwrap_or(JsValue::NULL))])
++        {
++            self.document.set(Some(document));
++        }
+         let dirty = app.session.docs.iter().any(|d| d.is_dirty());
+         if reported.0.get() != Some(dirty) && self.send(&[("type", "cadcraft:dirty".into()), ("dirty", dirty.into())]) {
+             reported.0.set(Some(dirty));
+--- a/apps/cadcraft-web/src/main.rs
++++ b/apps/cadcraft-web/src/main.rs
+@@ -33,6 +33,9 @@
+             self.1.take_dropped(ctx);
+             self.1.drain(&mut self.0);
+             self.0.system_animations = self.3.as_ref().map(|reduced| !reduced.matches());
++            if let Some((bridge, _)) = &self.2 {
++                bridge.run_requests(&mut self.0, ctx);
++            }
+             self.0.logic(ctx);
+             if let Some((bridge, reported)) = &self.2 {
+                 bridge.report_dirty(&self.0, reported);
+@@ -147,7 +150,7 @@
+                             None
+                         }));
+                         let host = app_bridge.map(|bridge| {
+-                            bridge.listen(inbox.clone());
++                            bridge.listen(inbox.clone(), cc.egui_ctx.clone());
+                             bridge.post_ready();
+                             (bridge, crate::host::DirtyReport::default())
+                         });

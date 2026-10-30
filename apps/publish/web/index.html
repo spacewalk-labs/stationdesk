@@ -1,0 +1,1653 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Publish · StationDesk</title>
+<meta name="apple-mobile-web-app-title" content="Publish">
+<link rel="icon" id="site-icon" type="image/svg+xml" href="/hub/icon.svg">
+<link rel="apple-touch-icon" href="/publish/apple-touch-icon.png">
+<link rel="stylesheet" href="/assets/stationdesk-tokens.css">
+<style>
+  :root {
+    --bg: var(--stationdesk-canvas); --surface: var(--stationdesk-surface-1); --text: var(--stationdesk-ink); --muted: var(--stationdesk-mute);
+    --line: var(--stationdesk-hairline); --accent: var(--stationdesk-primary); --danger: #d70015; --hover: var(--stationdesk-surface-2);
+    --warn: #b25000; --warn-bg: #fdf0e3; --danger-bg: #ffecec; --info-bg: #eaf3ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: var(--stationdesk-canvas); --surface: var(--stationdesk-surface-1); --text: var(--stationdesk-ink); --muted: var(--stationdesk-mute);
+            --line: var(--stationdesk-hairline); --accent: var(--stationdesk-primary); --danger: #ff453a; --hover: var(--stationdesk-surface-2);
+            --warn: #ff9f0a; --warn-bg: #382a12; --danger-bg: #3a1518; --info-bg: #16273d; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: max(env(safe-area-inset-top), 1.5rem) 1.25rem 4rem;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; }
+  header { margin-bottom: 1.25rem; }
+  h1 { font-size: 1.6rem; margin: 0; letter-spacing: -0.02em; }
+  .head-row { display: flex; align-items: center; gap: 0.75rem; }
+  .head-row .grow { flex: 1; min-width: 0; }
+  .site-icon { width: 36px; height: 36px; border-radius: 9px; object-fit: contain; flex: none; }
+  .site-icon[hidden] { display: none; }
+  .kvrow { display: grid; grid-template-columns: 8rem 1fr; gap: 0.5rem 0.75rem; font-size: 0.9rem; align-items: center; margin: 0.5rem 0 1rem; }
+  .kvrow .k { color: var(--muted); }
+  .kvrow code { background: var(--hover); padding: 2px 6px; border-radius: 6px; word-break: break-all; }
+  .fav { display: flex; align-items: center; gap: 0.6rem; }
+  .fav img { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); object-fit: contain; }
+  .fav .sub { margin: 0; }
+  .prompt { display: flex; gap: 0.75rem; align-items: center; justify-content: space-between; border: 1px dashed var(--line);
+            background: var(--hover); border-radius: 12px; padding: 0.7rem 0.9rem; font-size: 0.85rem; }
+  .prompt span { flex: 1; min-width: 0; word-break: break-word; }
+  .sub { color: var(--muted); font-size: 0.9rem; margin-top: 0.2rem; word-break: break-all; }
+
+  .notice {
+    background: var(--info-bg); border-left: 3px solid var(--accent);
+    border-radius: 0 10px 10px 0; padding: 0.7rem 0.9rem;
+    margin-bottom: 0.9rem; font-size: 0.86rem; color: var(--text);
+  }
+  .notice code { background: var(--hover); padding: 1px 6px; border-radius: 6px; font-size: 0.9em; }
+
+  /* buttons */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--surface); border: 1px solid var(--line); color: var(--text);
+    padding: 7px 14px; border-radius: 980px; font-size: 0.9rem;
+    cursor: pointer; text-decoration: none; font-family: inherit; line-height: 1.2;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn.sm { padding: 4px 11px; font-size: 0.82rem; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--stationdesk-on-primary); }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn.danger { color: var(--danger); border-color: var(--danger); }
+  .btn.danger:hover { background: var(--danger); color: #fff; }
+
+  /* bars */
+  .bar { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+  .filterbar input[type="search"], .filterbar select {
+    background: var(--surface); border: 1px solid var(--line); color: var(--text);
+    padding: 7px 11px; border-radius: 10px; font: inherit; font-size: 0.9rem;
+  }
+  .filterbar input[type="search"] { flex: 1; min-width: 160px; }
+  .count { color: var(--muted); font-size: 0.85rem; margin-left: auto; font-variant-numeric: tabular-nums; }
+  .ext-note { color: var(--muted); font-size: 0.85rem; }
+
+  .batchbar {
+    display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap;
+    padding: 0.6rem 0.9rem; margin-bottom: 0.9rem;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  }
+  .chk { display: inline-flex; align-items: center; gap: 6px; font-size: 0.88rem; cursor: pointer; }
+  .chk input { width: 16px; height: 16px; accent-color: var(--accent); }
+  .batchbar .selcount { color: var(--muted); font-size: 0.85rem; margin-left: auto; font-variant-numeric: tabular-nums; }
+
+  /* list */
+  .list { display: flex; flex-direction: column; gap: 0.6rem; }
+  .pager { display: flex; justify-content: center; align-items: center; gap: 4px; margin: 14px 0 4px; flex-wrap: wrap; }
+  .pager button { min-width: 32px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); font: inherit; font-size: 0.85rem; cursor: pointer; }
+  .pager button:hover:not(:disabled) { border-color: var(--muted); }
+  .pager button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .pager button:disabled { opacity: 0.4; cursor: default; }
+  .pager .gap { color: var(--muted); padding: 0 4px; }
+  .folderhdr {
+    padding: 0.6rem 0.2rem 0.1rem; font-size: 0.75rem; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.04em; word-break: break-all;
+  }
+  .row {
+    display: flex; align-items: flex-start; gap: 0.75rem;
+    padding: 0.8rem 0.9rem;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    transition: border-color .1s ease;
+  }
+  .row:hover { border-color: var(--muted); }
+  .row.direct { border-left: 3px solid var(--warn); }
+  .row.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .rowchk { width: 17px; height: 17px; margin-top: 3px; accent-color: var(--accent); flex: 0 0 auto; cursor: pointer; }
+  .main { flex: 1 1 auto; min-width: 0; }
+  .nameline { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .icon { flex: 0 0 auto; }
+  .name { color: var(--accent); text-decoration: none; font-weight: 600; word-break: break-all; }
+  .name:hover { text-decoration: underline; }
+  .tag {
+    display: inline-block; padding: 0 6px; border-radius: 6px;
+    background: var(--hover); color: var(--muted);
+    font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .row.direct .tag { background: var(--warn-bg); color: var(--warn); }
+  .meta { color: var(--muted); font-size: 0.82rem; margin-top: 0.15rem; }
+  .target { color: var(--muted); font-size: 0.8rem; margin-top: 0.1rem; word-break: break-all; font-variant-numeric: tabular-nums; }
+  .acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; justify-content: flex-end; }
+  .confirm { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .cinput {
+    background: var(--bg); border: 1px solid var(--danger); color: var(--text);
+    padding: 4px 9px; border-radius: 8px; font: inherit; font-size: 0.82rem; width: 190px; max-width: 55vw;
+  }
+  .empty { color: var(--muted); text-align: center; padding: 3rem 1rem; }
+
+  /* inline per-row public-link management */
+  .pubrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 0.45rem; font-size: 0.8rem; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 980px;
+    border: 1px solid var(--accent); color: var(--accent); background: var(--surface); white-space: nowrap;
+  }
+  .chip.soon { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+  .chip.expired { color: var(--muted); border-color: var(--line); text-decoration: line-through; }
+  /* filter chips and row titles */
+  .filterbar { flex-wrap: wrap; }
+  .facets { display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: .3rem; }
+  .frow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .frow .fl { width: 74px; color: var(--muted); font-size: .78rem; font-weight: 600; }
+  .fc { border: 1px solid var(--line); background: var(--surface); color: var(--text); border-radius: 999px; padding: 3px 11px; font: inherit; font-size: .8rem; cursor: pointer; }
+  .fc .n { color: var(--muted); margin-left: 4px; font-variant-numeric: tabular-nums; }
+  .fc.on { background: var(--accent); border-color: var(--accent); color: var(--stationdesk-on-primary); }
+  .fc.on .n { color: inherit; opacity: .8; }
+  .activebar { width: 100%; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: .82rem; color: var(--muted); }
+  .activebar:empty { display: none; }
+  .activebar .x { color: var(--accent); cursor: pointer; font-weight: 600; background: none; border: 0; font: inherit; padding: 0; }
+  .doctitle { color: var(--text); font-weight: 650; font-size: 1rem; letter-spacing: -.02em; text-decoration: none; word-break: break-word; }
+  a.doctitle:hover { text-decoration: underline; }
+  .fname { word-break: break-all; }
+  .proj { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--hover); color: var(--muted); font-size: .72rem; }
+  mark { background: oklch(92% .09 95); color: inherit; border-radius: 3px; padding: 0 1px; }
+  @media (prefers-color-scheme: dark) { mark { background: oklch(45% .09 95); } }
+
+  /* header tabs */
+  .tabs { display: flex; gap: 4px; background: var(--hover); padding: 4px; border-radius: 12px; }
+  .tabs button { border: 0; background: transparent; font: inherit; font-size: .88rem; font-weight: 600; padding: 6px 14px; border-radius: 9px; color: var(--muted); cursor: pointer; }
+  .tabs button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px oklch(20% .02 255 / .12); }
+  .tabs .n { opacity: .6; font-variant-numeric: tabular-nums; }
+
+  /* share popover and row menu */
+  #pop { position: absolute; z-index: 120; width: 380px; max-width: calc(100vw - 16px); background: var(--surface); border-radius: 16px;
+         box-shadow: 0 18px 50px oklch(15% .03 255 / .25), 0 0 0 1px var(--line); overflow: hidden; }
+  #pop.menu { width: 210px; padding: 6px; }
+  #pop .menu-item { display: block; width: 100%; text-align: left; border: 0; background: transparent; color: var(--text); font: inherit; font-size: .88rem; padding: 8px 10px; border-radius: 8px; cursor: pointer; }
+  #pop .menu-item:hover { background: var(--hover); }
+  #pop .menu-item.danger { color: var(--danger); }
+  .pb { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; font-size: .86rem; }
+  .pb .ttl { font-weight: 650; word-break: break-word; }
+  .pb .od { color: var(--muted); font-size: .76rem; }
+  .seg { display: flex; background: var(--hover); border-radius: 10px; padding: 3px; gap: 2px; }
+  .seg button { flex: 1; border: 0; background: transparent; font: inherit; font-size: .8rem; font-weight: 600; color: var(--muted); padding: 6px 4px; border-radius: 8px; cursor: pointer; }
+  .seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px oklch(20% .02 255 / .14); }
+  .seg button:disabled { opacity: .45; cursor: not-allowed; }
+  .live { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: oklch(62% .17 150); flex: none; }
+  .urlbox { display: flex; gap: 6px; }
+  .urlbox input, .pb input[type="password"], .pb select { font: inherit; font-size: .82rem; padding: 6px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+  .urlbox input { flex: 1; min-width: 0; }
+  .orow { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .tg { width: 36px; height: 21px; border-radius: 999px; background: var(--line); position: relative; flex: none; border: 0; padding: 0; cursor: pointer; }
+  .tg::after { content: ""; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px #0003; transition: left .15s; }
+  .tg[aria-checked="true"] { background: var(--accent); }
+  .tg[aria-checked="true"]::after { left: 17px; }
+  .tg:disabled { opacity: .45; cursor: not-allowed; }
+  .warnline { background: var(--warn-bg); color: var(--warn); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+  .warnline .orow { color: var(--warn); }
+  .pf { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--bg); font-size: .78rem; color: var(--muted); }
+  .pf b { color: var(--text); }
+  .rowmore { padding: 4px 11px; }
+  .linkbtn { text-decoration: underline; border: 0; background: none; color: var(--accent); font: inherit; font-size: .78rem; cursor: pointer; padding: 0; text-align: left; }
+
+  /* modal */
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+    display: none; align-items: center; justify-content: center; padding: 1rem; z-index: 100;
+  }
+  .modal-bg.show { display: flex; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+    padding: 1.5rem; width: 100%; max-width: 560px; max-height: 85vh; overflow: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  }
+  .modal h2 { margin: 0 0 0.75rem; font-size: 1.2rem; }
+  .modal p { color: var(--muted); font-size: 0.9rem; margin: 0.4rem 0 1rem; }
+  .modal label.field { display: block; font-size: 0.9rem; margin: 0.75rem 0; }
+  .modal .kv { font-size: 0.88rem; margin: 0.4rem 0; }
+  .modal .kv .klabel { color: var(--muted); display: inline-block; min-width: 72px; }
+  .modal .kv code { background: var(--hover); padding: 2px 6px; border-radius: 6px; word-break: break-all; }
+  .modal select, .modal input[type="password"] {
+    display: block; margin-top: 0.4rem; background: var(--bg); border: 1px solid var(--line);
+    color: var(--text); padding: 7px 11px; border-radius: 10px; font: inherit; font-size: 0.9rem;
+  }
+  .warn-box {
+    background: var(--info-bg); border-left: 3px solid var(--accent);
+    padding: 0.7rem 0.9rem; margin: 0.75rem 0; font-size: 0.85rem; border-radius: 0 8px 8px 0;
+  }
+  .warn-box.danger { background: var(--danger-bg); border-left-color: var(--danger); }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 1.25rem; }
+  .result { margin-top: 1rem; padding: 0.9rem; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; }
+  .result a { color: var(--accent); word-break: break-all; }
+  .result .exp { color: var(--muted); font-size: 0.82rem; margin-top: 0.5rem; }
+  .result .btn { margin-top: 0.6rem; }
+  .bundle-list {
+    max-height: 180px; overflow: auto; margin-top: 0.5rem; padding: 0.55rem 0.7rem;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  }
+  .bundle-list label { display: block; cursor: pointer; font-size: 0.85rem; margin: 0.35rem 0; word-break: break-word; }
+  .bundle-list input { margin-right: 7px; accent-color: var(--accent); }
+  .bundle-diagnostics { margin-top: 0.55rem; color: var(--warn); font-size: 0.84rem; white-space: pre-wrap; word-break: break-word; }
+
+  /* batch confirm modal groups */
+  .batch-group { margin: 0.75rem 0; }
+  .batch-group .gh { font-size: 0.86rem; font-weight: 600; margin-bottom: 0.35rem; }
+  .batch-group.sym .gh { color: var(--accent); }
+  .batch-group.direct .gh { color: var(--danger); }
+  .batch-group.pub .gh { color: var(--accent); }
+  .batch-group.skip .gh { color: var(--muted); }
+  .batch-list {
+    max-height: 200px; overflow: auto; border: 1px solid var(--line); border-radius: 8px;
+    padding: 0.5rem; background: var(--bg); font-size: 0.78rem; line-height: 1.7;
+  }
+  .batch-list .li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  .ack { display: flex; align-items: flex-start; gap: 8px; margin-top: 0.5rem; font-size: 0.85rem; }
+  .ack input { margin-top: 3px; width: 16px; height: 16px; accent-color: var(--danger); flex: 0 0 auto; }
+
+  /* toast */
+  #toast {
+    position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
+    background: var(--surface); color: var(--text); border: 1px solid var(--line);
+    border-radius: 980px; padding: 0.6rem 1.25rem; font-size: 0.9rem;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.2); opacity: 0; pointer-events: none;
+    transition: opacity .2s ease; z-index: 200; max-width: 90vw; text-align: center;
+  }
+  #toast.show { opacity: 1; }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --danger: oklch(55% .205 25);
+      --warn: oklch(52% .13 62); --warn-bg: oklch(95% .035 62);
+      --danger-bg: oklch(95% .035 25); --info-bg: var(--stationdesk-surface-2);
+    }
+  }
+  body { padding: max(env(safe-area-inset-top), 3rem) 1.25rem 5rem; letter-spacing: -.012em; }
+  .wrap { max-width: 1040px; }
+  header { margin-bottom: 2rem; padding-left: 48px; }
+  h1 { font-size: 2.15rem; line-height: 1.2; letter-spacing: -.055em; }
+  .sub { margin-top: .35rem; }
+  .notice { border: 0; border-radius: 14px; padding: .9rem 1rem; margin-bottom: 1rem; }
+  .btn { min-height: 38px; padding: 8px 15px; border-radius: 11px; font-weight: 600; transition: background .18s cubic-bezier(.22,1,.36,1), transform .18s cubic-bezier(.22,1,.36,1); }
+  .btn:hover { background: var(--hover); }
+  .btn:active { transform: scale(.975); }
+  .btn.primary:hover { background: var(--accent); filter: brightness(.96); }
+  .btn.danger:hover { background: var(--danger-bg); color: var(--danger); }
+  .filterbar { padding: .7rem; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 10px 32px oklch(25% .03 255 / .055); }
+  .filterbar input[type="search"] { min-height: 44px; border: 0; background: var(--hover); border-radius: 11px; padding-inline: 14px; }
+  .filterbar select { min-height: 40px; border-radius: 10px; }
+  .batchbar { border-radius: 14px; padding: .75rem .9rem; }
+  .list { gap: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: 0 8px 28px oklch(25% .03 255 / .045); }
+  .row { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 1rem 1.1rem; transition: background .18s cubic-bezier(.22,1,.36,1); }
+  .row:last-child { border-bottom: 0; }
+  .row:hover { background: var(--hover); }
+  .row.direct { border-left: 0; }
+  .row.direct .tag { color: var(--warn); background: var(--warn-bg); }
+  .row.selected { border-color: var(--line); background: var(--info-bg); box-shadow: none; }
+  .name { font-size: .98rem; letter-spacing: -.02em; }
+  .tag { border-radius: 999px; padding: 2px 8px; letter-spacing: 0; text-transform: none; }
+  .modal { border: 0; border-radius: 20px; box-shadow: 0 24px 70px oklch(15% .03 255 / .22); }
+  .warn-box { border: 0; border-radius: 12px; }
+  #toast { border: 0; box-shadow: 0 10px 32px oklch(15% .03 255 / .18); }
+  @media (max-width: 640px) {
+    body { padding: max(env(safe-area-inset-top), 2rem) 1rem 4rem; }
+    h1 { font-size: 1.9rem; }
+    .filterbar { display: grid; grid-template-columns: 1fr 1fr; }
+    .filterbar input[type="search"] { grid-column: 1 / -1; width: 100%; }
+    .filterbar .count { grid-column: 1 / -1; margin-left: 0; }
+    .row { flex-wrap: wrap; padding: 1rem; }
+    .acts { width: 100%; justify-content: flex-start; padding-left: 29px; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="head-row">
+    <img class="site-icon" id="site-logo" alt="" hidden>
+    <div class="grow">
+      <h1 id="site-name">Publish</h1>
+      <div class="sub" id="root-note">Static share manager</div>
+    </div>
+    <div class="tabs" id="tabs" hidden>
+      <button data-view="all" class="on">All documents</button>
+      <button data-view="public">Published <span class="n" id="pub-count">0</span></button>
+    </div>
+    <button class="btn" id="settings">Settings</button>
+  </header>
+
+  <div class="notice">
+    <strong>Unpublishing removes only the symlink — the original file is preserved.</strong>
+    The link in <code>/publish/files/</code> disappears, so the item is no longer reachable, but the source it points to stays on disk.
+  </div>
+
+  <div class="bar">
+    <label class="btn">Upload file<input type="file" id="upload" hidden></label>
+    <button class="btn" id="repair">Repair broken links</button>
+    <span class="ext-note" id="ext-note" hidden>External publishing not configured</span>
+    <span class="ext-note" id="funnel-note" hidden>Tailscale Funnel is not enabled for this tailnet, so external links will not open yet. Allow the <code>funnel</code> attribute for this machine in the <a href="https://login.tailscale.com/admin/acls" target="_blank" rel="noopener">Tailscale admin console</a>, then run <code>stationdesk add publish</code> again.</span>
+  </div>
+
+  <div class="bar filterbar">
+    <input type="search" id="search" placeholder="Search title, file name, project…" autocomplete="off">
+    <select id="sort" aria-label="Sort">
+      <option value="mtime-desc">Newest first</option>
+      <option value="mtime-asc">Oldest first</option>
+      <option value="views-desc">Most viewed</option>
+      <option value="views-asc">Least viewed</option>
+      <option value="name">Name</option>
+      <option value="folder">Group by folder</option>
+    </select>
+    <span class="count" id="count"></span>
+    <div class="facets" id="facets"></div>
+    <div class="activebar" id="activebar"></div>
+  </div>
+
+  <div class="batchbar">
+    <label class="chk"><input type="checkbox" id="selall"> Select all</label>
+    <button class="btn sm age" data-days="14">2wk+</button>
+    <button class="btn sm age" data-days="30">1mo+</button>
+    <button class="btn sm age" data-days="90">3mo+</button>
+    <button class="btn sm" id="selclear">Clear</button>
+    <span class="selcount" id="selcount">0 selected</span>
+    <button class="btn danger" id="dounpublish" disabled>Unpublish selected</button>
+  </div>
+
+  <div class="list" id="list"></div>
+  <div class="pager" id="pager" hidden></div>
+  <div class="empty" id="empty" hidden>No published items.</div>
+</div>
+
+<!-- unpublish (symlink) modal — optionally revoke the external link too -->
+<div class="modal-bg" id="m-sym">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="sym-h">
+    <h2 id="sym-h">Unpublish</h2>
+    <p>Only the symlink is removed — the original file it points to is preserved.</p>
+    <div class="kv"><span class="klabel">Name</span><code id="sym-name">—</code></div>
+    <div class="kv"><span class="klabel">Original</span><code id="sym-target">—</code></div>
+    <div class="warn-box" id="sym-pubwarn" hidden>
+      <span id="sym-pubtext">This item is also published externally</span> (<span id="sym-pubexp">—</span>). Unpublishing here does not affect the public link.
+      <label class="ack"><input type="checkbox" id="sym-pubrevoke"><span>Also revoke the public link (immediate 404)</span></label>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" data-close>Cancel</button>
+      <button class="btn danger" id="sym-confirm">Unpublish</button>
+    </div>
+  </div>
+</div>
+
+<!-- batch unpublish confirm modal — grouped by kind, per-item lists, acks -->
+<div class="modal-bg" id="m-batch">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="batch-h">
+    <h2 id="batch-h">Unpublish selected</h2>
+    <p>Review what will happen, then confirm.</p>
+    <div id="batch-body"></div>
+    <div class="modal-actions">
+      <button class="btn" data-close>Cancel</button>
+      <button class="btn danger" id="batch-confirm">Unpublish selected</button>
+    </div>
+  </div>
+</div>
+
+<!-- external publish modal -->
+<div class="modal-bg" id="m-pub">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pub-h">
+    <h2 id="pub-h">Publish externally</h2>
+    <p>A self-contained snapshot of <b id="pub-name"></b> is copied to a public URL. Anyone with the link can view it — publish public-safe content only. Editing the source later requires re-publishing to refresh the snapshot.</p>
+    <p class="exp" id="pub-dest"></p>
+    <label class="field">Duration
+      <select id="pub-ttl">
+        <option value="24">24 hours</option>
+        <option value="168">7 days</option>
+        <option value="336" selected>14 days</option>
+        <option value="720">30 days</option>
+      </select>
+    </label>
+    <label class="field">Access
+      <select id="pub-mode">
+        <option value="open">Open</option>
+        <option value="gated">Gated (password)</option>
+      </select>
+    </label>
+    <label class="field" id="pub-password-field" hidden>Password
+      <input id="pub-password" type="password" autocomplete="new-password">
+    </label>
+    <div class="exp" id="pub-gated-note" hidden></div>
+    <div class="warn-box" id="pub-bundle-field" hidden>
+      <strong>Linked documents</strong>
+      <div id="pub-bundle-note">Planning linked documents…</div>
+      <div class="bundle-list" id="pub-bundle-list"></div>
+      <div class="bundle-diagnostics" id="pub-bundle-diagnostics" hidden></div>
+    </div>
+    <div class="result" id="pub-result" hidden>
+      <a id="pub-url" href="#" target="_blank" rel="noopener"></a>
+      <div><button class="btn sm" id="pub-copy">Copy URL</button></div>
+      <div class="exp" id="pub-expiry"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" data-close>Close</button>
+      <button class="btn primary" id="pub-go">Publish</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="m-settings">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-h">
+    <h2 id="settings-h">Settings</h2>
+    <p>Read from <code id="set-file"></code>. To change, ask your agent &mdash; the prompt is ready to copy.</p>
+    <div class="kvrow">
+      <span class="k">Site name</span><span id="set-name"></span>
+      <span class="k">Favicon</span><span class="fav"><img id="set-favicon" alt=""><span class="sub" id="set-favnote"></span></span>
+      <span class="k">External links</span><span id="set-dest"></span>
+      <span class="k">Share folder</span><span><code id="set-share"></code></span>
+    </div>
+    <div class="prompt"><span id="set-prompt"></span><button class="btn sm" id="set-copy">Copy prompt</button></div>
+    <p class="sub">Your own domain: Funnel only serves <code>*.ts.net</code> names, so ask your agent to connect yours.</p>
+    <div class="prompt"><span id="set-domain-prompt">Read /opt/stationdesk/apps/publish/docs/custom-domain.md and connect docs.example.com to my publish app.</span><button class="btn sm" id="set-domain-copy">Copy prompt</button></div>
+    <div class="modal-actions">
+      <button class="btn" data-close>Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="pop" hidden></div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+var $ = function (s, r) { return (r || document).querySelector(s); };
+var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+
+// A failed public-list response is unknown, not evidence that a source is unpublished.
+var state = { items: [], pubBySrc: {}, publicListState: "unknown", publicListError: "", loadSeq: 0, publicEnabled: false, publicMode: "", gatedEnabled: false, gatedReason: "", root: "",
+              page: 1, selected: {}, confirming: {}, filtered: [], view: "all", sel: { type: {}, status: {}, project: {}, age: {}, views: {} }, indexing: { available: false, reason: "" } };
+var pop = null; // open popover: { kind: "share"|"menu", name, draft, btn }
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+function keys(o) { return Object.keys(o); }
+
+// TTL options reused by the publish modal, inline expiry chips, and my-links.
+function ttlOptions(sel) {
+  return '<option value="24"' + (sel === 24 ? " selected" : "") + ">24 hours</option>"
+       + '<option value="168"' + (sel === 168 ? " selected" : "") + ">7 days</option>"
+       + '<option value="336"' + (sel === 336 ? " selected" : "") + ">14 days</option>"
+       + '<option value="720"' + (sel === 720 ? " selected" : "") + ">30 days</option>";
+}
+
+// ---- toast ----
+var toastT;
+function toast(msg) {
+  var t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastT); toastT = setTimeout(function () { t.classList.remove("show"); }, 2400);
+}
+
+// ---- clipboard copy (execCommand fallback for non-secure http) ----
+function execCopy(text) {
+  try {
+    var ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length);
+    var ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).then(function () { return true; }, function () { return execCopy(text); });
+  }
+  return Promise.resolve(execCopy(text));
+}
+function copyAndToast(text) {
+  copyText(text).then(function (ok) { toast(ok ? "Copied to clipboard" : "Copy failed — select and copy manually"); });
+}
+
+// ---- api ----
+function apiGet(path) {
+  return fetch(path, { cache: "no-store", headers: { Accept: "application/json" } }).then(function (r) { return r.json(); });
+}
+function apiPost(path, body) {
+  return fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) })
+    .then(function (r) { return r.json(); });
+}
+
+// ---- relative time (exact timestamp kept as the title tooltip) ----
+function relTime(epoch) {
+  if (!epoch) return "";
+  var d = Math.floor(Date.now() / 1000) - epoch;
+  if (d < 60) return d + "s ago";
+  if (d < 3600) return Math.floor(d / 60) + "m ago";
+  if (d < 86400) return Math.floor(d / 3600) + "h ago";
+  if (d < 86400 * 30) return Math.floor(d / 86400) + "d ago";
+  if (d < 86400 * 365) return Math.floor(d / (86400 * 30)) + "mo ago";
+  return Math.floor(d / (86400 * 365)) + "y ago";
+}
+
+// ---- load ----
+function load() {
+  var loadSeq = state.loadSeq + 1;
+  state.loadSeq = loadSeq;
+  if (state.publicEnabled) {
+    state.publicListState = "loading";
+    state.publicListError = "";
+    state.pubBySrc = {};
+    // Re-render immediately so stale public URLs and actions disappear during the lookup.
+    render();
+  }
+  return apiGet("/publish/api/list").then(function (d) {
+    // Each load owns its public-list response so an older lookup cannot replace newer state.
+    if (loadSeq !== state.loadSeq) return;
+    state.items = d.items || [];
+    state.publicEnabled = !!d.public_enabled;
+    state.publicMode = d.public_mode || "";
+    state.gatedEnabled = !!d.gated_enabled;
+    state.gatedReason = d.gated_disabled_reason || "";
+    state.root = d.root || "";
+    state.docURL = d.doc_url || "";
+    state.funnelOff = !!(d.funnel && !d.funnel.active);
+    state.site = d.site || null;
+    state.indexing = d.indexing || { available: false, reason: "" };
+    applySite();
+    state.publicListState = state.publicEnabled ? "loading" : "disabled";
+    state.publicListError = "";
+    state.pubBySrc = {};
+    var live = {};
+    state.items.forEach(function (x) { live[x.name] = true; });
+    keys(state.selected).forEach(function (n) { if (!live[n]) delete state.selected[n]; });
+    keys(state.confirming).forEach(function (n) { if (!live[n]) delete state.confirming[n]; });
+    applyPublicUI();
+    render();
+    // Public badges fetched AFTER the local list — a slow/dead remote never blocks rendering.
+    if (state.publicEnabled) {
+      apiGet("/publish/api/public-list").then(function (pd) {
+        if (loadSeq !== state.loadSeq) return;
+        // HTTP 200 with ok:false is an unknown public state, not an empty list.
+        if (!pd || !pd.ok) {
+          state.publicListState = "unknown";
+          state.publicListError = (pd && (pd.error || pd.message)) || "public status unavailable";
+          render();
+          return;
+        }
+        ((pd && pd.items) || []).forEach(function (p) { state.pubBySrc[p.src] = p; });
+        state.publicListState = "ready";
+        render();
+      }).catch(function (e) {
+        if (loadSeq !== state.loadSeq) return;
+        state.publicListState = "unknown";
+        state.publicListError = e.message || "public status unavailable";
+        state.pubBySrc = {};
+        render();
+      });
+    }
+  }).catch(function (e) {
+    if (loadSeq !== state.loadSeq) return;
+    $("#list").innerHTML = "";
+    var em = $("#empty"); em.hidden = false;
+    em.textContent = "Failed to reach backend: " + e.message;
+  });
+}
+
+function applySite() {
+  var site = state.site;
+  if (!site) return;
+  $("#site-name").textContent = site.name;
+  $("#site-logo").src = site.favicon;
+  $("#site-logo").hidden = false;
+  $("#site-icon").href = site.favicon;
+  $("#site-icon").removeAttribute("type");
+  if (site.custom_name) document.title = site.name;
+}
+
+function settingsPrompt(site) {
+  return "In my StationDesk Publish app, change the site name and favicon. Edit " + site.config_file
+    + ": set STATIONDESK_PUBLISH_SITE_NAME to the new name and STATIONDESK_PUBLISH_FAVICON to the path of an image file"
+    + " (.svg, .png or .ico, up to 256 KB). Leave every other line and the file mode as they are, then run"
+    + " `systemctl --user restart stationdesk-publish`. Currently: site name \"" + site.name + "\", favicon "
+    + (site.favicon_source || "the built-in icon") + ".";
+}
+
+function openSettings() {
+  var site = state.site;
+  if (!site) return;
+  var where = { funnel: "Tailscale Funnel", remote: "Remote endpoint", local: "This box", none: "Not configured" }[site.destination];
+  $("#set-file").textContent = site.config_file;
+  $("#set-name").textContent = site.name;
+  $("#set-favicon").src = site.favicon;
+  $("#set-favnote").textContent = (site.favicon_source || "Built-in icon")
+    + (site.favicon_error ? " \u00b7 not used (" + site.favicon_error + ")" : " \u00b7 added to published pages without their own icon");
+  $("#set-dest").textContent = where + (site.base_url ? " \u00b7 " + site.base_url : "")
+    + (site.destination === "funnel" && state.funnelOff ? " \u00b7 blocked by tailnet policy" : "");
+  $("#set-share").textContent = site.share_dir;
+  $("#set-prompt").textContent = settingsPrompt(site);
+  $("#m-settings").classList.add("show");
+}
+
+function applyPublicUI() {
+  $("#tabs").hidden = !state.publicEnabled;
+  $("#ext-note").hidden = state.publicEnabled;
+  $("#funnel-note").hidden = !(state.publicEnabled && state.funnelOff);
+  if (state.root) $("#root-note").textContent = "Managing " + state.root;
+}
+
+// ---- render ----
+function iconFor(it) {
+  if (it.type === "dir") return "📁";
+  if (it.type === "image") return "🖼";
+  return it.isLink ? "📄" : "📌";
+}
+
+function sortRows(rows, mode) {
+  var r = rows.slice();
+  if (mode === "mtime-desc") r.sort(function (a, b) { return (b.mtime_epoch || 0) - (a.mtime_epoch || 0); });
+  else if (mode === "mtime-asc") r.sort(function (a, b) { return (a.mtime_epoch || 0) - (b.mtime_epoch || 0); });
+  else if (mode === "views-desc") r.sort(function (a, b) { return (b.views || 0) - (a.views || 0) || (b.last_view || 0) - (a.last_view || 0); });
+  else if (mode === "views-asc") r.sort(function (a, b) { return (a.views || 0) - (b.views || 0) || (a.mtime_epoch || 0) - (b.mtime_epoch || 0); });
+  else if (mode === "name") r.sort(function (a, b) { return a.name.localeCompare(b.name); });
+  else if (mode === "folder") r.sort(function (a, b) {
+    var ad = a.target_dir || "zzzz", bd = b.target_dir || "zzzz";
+    if (ad !== bd) return ad.localeCompare(bd);
+    return a.name.localeCompare(b.name);
+  });
+  return r;
+}
+
+// Public status of a row: a chip only; everything you can do about it is in the Share popover.
+function pubChips(it) {
+  if (state.publicEnabled && state.publicListState !== "ready" && it.type === "html") {
+    return '<span class="chip soon" title="' + esc(state.publicListError || "Checking public status…") + '">? Public status unknown</span>';
+  }
+  var pub = state.pubBySrc[it.name];
+  return pub ? pubChip(it, pub) : "";
+}
+// When the snapshot was taken: the last Update, else the first publish.
+function snapAt(pub) { return pub.snapshot_at || pub.created || 0; }
+function pubChip(it, pub) {
+  if (pub.expired) return '<span class="chip expired">' + (pub.mode === "gated" ? "🔒 Password" : "🔗 Link") + " · Expired</span>";
+  var days = Math.ceil((pub.expiry - Math.floor(Date.now() / 1000)) / 86400);
+  var stale = !!(it && snapAt(pub) && it.mtime_epoch && it.mtime_epoch > snapAt(pub));
+  return '<span class="chip ' + (days <= 3 ? "soon" : "") + '">'
+    + (pub.mode === "gated" ? "🔒 Password" : pub.indexed ? "🔎 Search engines" : "🔗 Anyone with link")
+    + " · D-" + days + "</span>"
+    + (stale ? '<span class="chip soon">Source changed</span>' : "");
+}
+
+function rowHTML(it) {
+  // The hub path works for whoever is looking at this page and 403s for everyone they
+  // send it to — same directory, different gate. When the box publishes a document port
+  // (tailnet_view on) that port's URL is the only one worth copying, so use it for both
+  // the name link and Copy. Without one, no link here is open to others; keep the hub
+  // path and do not offer Copy, rather than handing out a link that will not open.
+  var docURL = state.docURL ? state.docURL + "/" + encodeURIComponent(it.name) : "";
+  var fileURL = docURL || "/publish/files/" + encodeURIComponent(it.name);
+  var pub = state.pubBySrc[it.name];
+  var meta = '<span class="fname">' + hl(it.name) + "</span> · "
+           + '<span title="' + esc(it.mtime) + '">' + esc(relTime(it.mtime_epoch)) + "</span> · " + esc(it.size)
+           + (it.views ? ' · <span title="' + (it.last_view ? "last " + esc(relTime(it.last_view)) : "") + '">' + it.views + (it.views === 1 ? " view" : " views") + "</span>" : "")
+           + ' · <span class="proj">' + hl(projectOf(it)) + "</span>"
+           + (it.isLink ? "" : ' <span class="tag">file</span>')
+           + (it.isBroken ? ' · <span style="color:var(--danger)">broken link</span>' : "");
+  var target = "";
+
+  var acts = "";
+  if (state.confirming[it.name]) {
+    acts += '<span class="confirm"><input class="cinput" placeholder="type name to confirm" aria-label="confirm filename">'
+          + '<button class="btn sm danger" data-act="delete-confirm" data-name="' + esc(it.name) + '">Delete</button>'
+          + '<button class="btn sm" data-act="delete-cancel" data-name="' + esc(it.name) + '">Cancel</button></span>';
+  } else {
+    // Without a confirmed public list there is nothing safe to show in the popover.
+    if (state.publicEnabled && it.type === "html") {
+      acts += '<button class="btn sm" data-act="share" data-name="' + esc(it.name) + '">' + (pub && !pub.expired ? "Shared" : "Share") + "</button>";
+    }
+    if (docURL || it.isLink || (!it.isDir && !it.isLink)) {
+      acts += '<button class="btn sm rowmore" data-act="more" data-name="' + esc(it.name) + '" aria-label="More">⋯</button>';
+    }
+  }
+
+  var checked = state.selected[it.name] ? " checked" : "";
+  var sel = state.selected[it.name] ? " selected" : "";
+  var direct = (!it.isLink && !it.isDir) ? " direct" : "";
+  return '<div class="row' + sel + direct + '">'
+    + '<input type="checkbox" class="rowchk" data-name="' + esc(it.name) + '"' + checked + ' aria-label="select ' + esc(it.name) + '">'
+    + '<div class="main">'
+    +   '<div class="nameline"><span class="icon">' + iconFor(it) + "</span>"
+    +     '<a class="doctitle" href="' + fileURL + '" target="_blank" rel="noopener">' + hl(it.title || it.name) + "</a>"
+    +     pubChips(it)
+    +     "</div>"
+    +   '<div class="meta">' + meta + "</div>" + target
+    + "</div>"
+    + '<div class="acts">' + acts + "</div>"
+    + "</div>";
+}
+
+// ---- search and filter chips: OR within a row, AND across rows ----
+// TESTABLE:FILTERS_START
+var FACETS = [["type", "Type"], ["status", "Status"], ["project", "Project"], ["age", "Modified"], ["views", "Views"]];
+var LABEL = { html: "HTML", image: "Image", dir: "Folder", file: "File",
+  public: "Published", private: "Only me", password: "Password", expiring: "Expiring ≤3d", changed: "Source changed",
+  broken: "Broken", direct: "Direct file", "7d": "≤ 7 days", "30d": "≤ 30 days", "90d": "≤ 90 days", old: "Older", v0: "0 views", lt3: "< 3 views", ge10: "≥ 10 views" };
+var PUB_STATUS = { public: 1, private: 1, password: 1, expiring: 1, changed: 1 };
+var FACET_ORDER = {
+  type: ["html", "image", "dir", "file"],
+  status: ["public", "private", "password", "expiring", "changed", "broken", "direct"],
+  age: ["7d", "30d", "90d", "old"],
+  views: ["v0", "lt3", "ge10"] };
+
+// Project = the repository a symlinked document lives in (~/workspace/<project>/…), else its folder.
+function projectOf(it) {
+  if (!it.isLink) return "(direct)";
+  var parts = String(it.target_dir || it.target || "").split("/").filter(Boolean);
+  var i = parts.indexOf("workspace");
+  if (i >= 0 && parts[i + 1]) return parts[i + 1];
+  return parts[parts.length - 1] || "(unknown)";
+}
+// Cumulative, as the chips read: a document edited yesterday is in "≤ 7 days", "≤ 30 days" and "≤ 90 days".
+function ageBuckets(it) {
+  var d = (Date.now() / 1000 - (it.mtime_epoch || 0)) / 86400;
+  return d > 90 ? ["old"] : [d <= 7 && "7d", d <= 30 && "30d", "90d"].filter(Boolean);
+}
+// Views are counted by Publish itself from the install on; a document nobody opened has none recorded.
+function viewBuckets(it) {
+  var n = it.views || 0;
+  return [n === 0 && "v0", n < 3 && "lt3", n >= 10 && "ge10"].filter(Boolean);
+}
+function pubKnown() { return !state.publicEnabled || state.publicListState === "ready"; }
+function statuses(it) {
+  var s = [], pub = state.pubBySrc[it.name];
+  if (pubKnown() && it.type === "html") {
+    if (pub && !pub.expired) {
+      s.push("public");
+      if (pub.mode === "gated") s.push("password");
+      if (Math.ceil((pub.expiry - Date.now() / 1000) / 86400) <= 3) s.push("expiring");
+      var at = snapAt(pub);
+      if (at && it.mtime_epoch > at) s.push("changed");
+    } else s.push("private");
+  }
+  if (it.isBroken) s.push("broken");
+  if (!it.isLink && !it.isDir) s.push("direct");
+  return s;
+}
+function facetVals(it, f) {
+  return f === "type" ? [it.type] : f === "status" ? statuses(it) : f === "project" ? [projectOf(it)] : f === "views" ? viewBuckets(it) : ageBuckets(it);
+}
+function selectedIn(f) {
+  var on = keys(state.sel[f]);
+  // While the public list is unknown, its statuses cannot be judged, so they do not hide anything.
+  return f === "status" && !pubKnown() ? on.filter(function (v) { return !PUB_STATUS[v]; }) : on;
+}
+function passFacet(it, f) {
+  var on = selectedIn(f);
+  if (!on.length) return true;
+  var v = facetVals(it, f);
+  return on.some(function (x) { return v.indexOf(x) >= 0; });
+}
+function searchWords() { return $("#search").value.trim().toLowerCase().split(/\s+/).filter(Boolean); }
+function matchesFilters(it) {
+  if (state.view === "public" && !state.pubBySrc[it.name]) return false;
+  var words = searchWords();
+  if (words.length) {
+    var hay = ((it.title || "") + " " + it.name + " " + projectOf(it)).toLowerCase();
+    if (!words.every(function (w) { return hay.indexOf(w) >= 0; })) return false;
+  }
+  return FACETS.every(function (f) { return passFacet(it, f[0]); });
+}
+// Highlight search words: match on the raw text, escape each piece after splitting.
+function hl(text) {
+  text = String(text == null ? "" : text);
+  var words = searchWords();
+  if (!words.length) return esc(text);
+  var re = new RegExp("(" + words.map(function (w) { return w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }).join("|") + ")", "ig");
+  return text.split(re).map(function (p, k) { return k % 2 ? "<mark>" + esc(p) + "</mark>" : esc(p); }).join("");
+}
+
+// Pagination: only the current page of the filtered rows is drawn.
+var PAGE_SIZE = 50;
+function pageCount(n) { return Math.max(1, Math.ceil(n / PAGE_SIZE)); }
+function clampPage(page, n) { return Math.min(Math.max(1, page | 0), pageCount(n)); }
+function pageSlice(rows, page) { var p = clampPage(page, rows.length); return rows.slice((p - 1) * PAGE_SIZE, p * PAGE_SIZE); }
+// Page numbers to show: first, last, and two on each side of the current one; 0 stands for "…".
+function pagerItems(page, pages) {
+  var out = [], last = 0;
+  for (var i = 1; i <= pages; i++) {
+    if (i === 1 || i === pages || Math.abs(i - page) <= 2) {
+      if (last && i - last > 1) out.push(i - last === 2 ? last + 1 : 0);
+      out.push(i); last = i;
+    }
+  }
+  return out;
+}
+// TESTABLE:FILTERS_END
+function facetValues(f) {
+  if (f !== "project") return FACET_ORDER[f];
+  var seen = {}; state.items.forEach(function (it) { seen[projectOf(it)] = 1; });
+  return keys(seen).sort();
+}
+function paintFacets() {
+  $("#facets").innerHTML = FACETS.map(function (f) {
+    var chips = facetValues(f[0]).map(function (v) {
+      var n = state.items.filter(function (it) { return facetVals(it, f[0]).indexOf(v) >= 0; }).length;
+      var on = !!state.sel[f[0]][v];
+      if (!n && !on) return "";
+      return '<button class="fc' + (on ? " on" : "") + '" aria-pressed="' + on + '" data-f="' + f[0] + '" data-v="' + esc(v) + '">'
+        + esc(LABEL[v] || v) + '<span class="n">' + n + "</span></button>";
+    }).join("");
+    return chips ? '<div class="frow"><span class="fl">' + f[1] + "</span>" + chips + "</div>" : "";
+  }).join("");
+  var act = [];
+  FACETS.forEach(function (f) { keys(state.sel[f[0]]).forEach(function (v) { act.push(LABEL[v] || v); }); });
+  $("#activebar").innerHTML = act.length
+    ? "Filtering: <b>" + act.map(esc).join("</b> · <b>") + '</b> <button class="x" id="clearfilters">Clear all</button>' : "";
+}
+$("#facets").addEventListener("click", function (ev) {
+  var b = ev.target.closest(".fc");
+  if (!b) return;
+  var m = state.sel[b.dataset.f];
+  if (m[b.dataset.v]) delete m[b.dataset.v]; else m[b.dataset.v] = true;
+  state.page = 1;
+  render();
+});
+$("#activebar").addEventListener("click", function (ev) {
+  if (!ev.target.closest("#clearfilters")) return;
+  state.sel = { type: {}, status: {}, project: {}, age: {}, views: {} };
+  state.page = 1;
+  render();
+});
+
+function orphanHTML(p) {
+  return '<div class="row"><span class="rowchk"></span><div class="main"><div class="nameline"><span class="icon">📄</span>'
+    + '<span class="name">' + esc(p.title || p.src) + '</span></div><div class="meta">source file missing · ' + esc(p.src) + "</div>"
+    + '<div class="pubrow">' + pubChip(null, p) + "</div></div>"
+    + '<div class="acts"><button class="btn sm" data-act="share" data-name="' + esc(p.src) + '">Shared</button></div></div>';
+}
+
+function render() {
+  var sortMode = $("#sort").value;
+  paintFacets();
+  var rows = sortRows(state.items.filter(matchesFilters), sortMode);
+  state.filtered = rows;
+  // While the public list reloads the public tab is briefly empty; draw page 1 but keep the remembered page.
+  var page = clampPage(state.page, rows.length), pages = pageCount(rows.length), pageRows = pageSlice(rows, page);
+  if (!(state.view === "public" && state.publicListState === "loading")) state.page = page;
+  $("#count").textContent = rows.length + " of " + state.items.length;
+
+  var pubs = keys(state.pubBySrc).map(function (k) { return state.pubBySrc[k]; });
+  $("#pub-count").textContent = pubs.length;
+  // A public link whose source file is gone has no row of its own; keep it manageable here.
+  var known = {}; state.items.forEach(function (x) { known[x.name] = true; });
+  var orphans = state.view === "public" ? pubs.filter(function (p) { return p.src && !known[p.src]; }) : [];
+  var list = $("#list"), empty = $("#empty");
+  paintPager(pages, page);
+  if (rows.length === 0 && !orphans.length) {
+    list.innerHTML = "";
+    empty.hidden = false;
+    empty.textContent = state.items.length === 0 ? "No published items." : "No items match the filter.";
+  } else {
+    empty.hidden = true;
+    if (sortMode === "folder") {
+      var out = "", lastFolder = null;
+      pageRows.forEach(function (it) {
+        var folder = it.target_dir || "(direct file)";
+        if (folder !== lastFolder) { out += '<div class="folderhdr">' + esc(folder) + "</div>"; lastFolder = folder; }
+        out += rowHTML(it);
+      });
+      list.innerHTML = out;
+    } else {
+      list.innerHTML = pageRows.map(rowHTML).join("");
+    }
+    if (page === pages) list.innerHTML += orphans.map(orphanHTML).join("");
+  }
+  updateBatch();
+  if (pop && pop.kind === "share") renderPop();
+}
+
+function paintPager(pages, p) {
+  var el = $("#pager");
+  el.hidden = pages <= 1;
+  if (pages <= 1) { el.innerHTML = ""; return; }
+  el.innerHTML = '<button data-p="' + (p - 1) + '" aria-label="Previous page"' + (p > 1 ? "" : " disabled") + ">←</button>"
+    + pagerItems(p, pages).map(function (i) {
+      return i ? '<button data-p="' + i + '"' + (i === p ? ' class="on" aria-current="page"' : "") + ">" + i + "</button>" : '<span class="gap">…</span>';
+    }).join("")
+    + '<button data-p="' + (p + 1) + '" aria-label="Next page"' + (p < pages ? "" : " disabled") + ">→</button>";
+}
+$("#pager").addEventListener("click", function (ev) {
+  var b = ev.target.closest("button[data-p]");
+  if (!b || b.disabled) return;
+  state.page = parseInt(b.dataset.p, 10);
+  render();
+  window.scrollTo(0, $("#list").getBoundingClientRect().top + window.scrollY - 80);
+});
+
+// ---- row actions ----
+$("#list").addEventListener("click", function (ev) {
+  var btn = ev.target.closest("[data-act]");
+  if (!btn) return;
+  var act = btn.dataset.act, name = btn.dataset.name;
+  if (act === "unpublish") openSymModal(name);
+  else if (act === "delete") { state.confirming[name] = true; render(); }
+  else if (act === "delete-cancel") { delete state.confirming[name]; render(); }
+  else if (act === "delete-confirm") doDeleteDirect(name, btn);
+  else if (act === "share") openPop("share", name, btn);
+  else if (act === "more") openPop("menu", name, btn);
+});
+
+$("#list").addEventListener("change", function (ev) {
+  var cb = ev.target.closest(".rowchk");
+  if (!cb) return;
+  var name = cb.dataset.name;
+  if (cb.checked) state.selected[name] = true; else delete state.selected[name];
+  var row = cb.closest(".row");
+  if (row) row.classList.toggle("selected", cb.checked);
+  updateBatch();
+});
+
+function doDeleteDirect(name, btn) {
+  var input = btn.closest(".row").querySelector(".cinput");
+  var typed = input ? input.value : "";
+  if (typed !== name) { toast("Name does not match — deletion cancelled"); return; }
+  apiPost("/publish/api/unpublish-direct", { name: name, confirm_name: typed }).then(function (d) {
+    if (d.ok) { delete state.confirming[name]; toast("Deleted " + name); load(); }
+    else toast("Failed: " + (d.message || d.error || "error"));
+  }).catch(function (e) { toast("Failed: " + e.message); });
+}
+
+// ---- inline public-link row actions ----
+function ensurePublicListReady() {
+  // Public mutations must use a current list; unknown state cannot authorize a stale slug.
+  if (state.publicEnabled && state.publicListState === "ready") return true;
+  toast(state.publicEnabled
+    ? "Public status unavailable; wait for the list to load before changing the link."
+    : "External publishing is unavailable.");
+  return false;
+}
+function doRevoke(slug) {
+  if (!slug || !ensurePublicListReady()) return;
+  apiPost("/publish/api/public-revoke", { slug: slug }).then(function (d) {
+    if (d.ok) { toast("Revoked"); load(); }
+    else toast("Failed: " + (d.error || d.message || "error"));
+  }).catch(function (e) { toast("Failed: " + e.message); });
+}
+// ---- unpublish (symlink) modal ----
+var mSym = $("#m-sym");
+function openSymModal(name) {
+  var it = state.items.find(function (x) { return x.name === name; });
+  if (!it) return;
+  mSym.dataset.name = name;
+  $("#sym-name").textContent = name;
+  $("#sym-target").textContent = it.target || "?";
+  var pub = state.pubBySrc[name];
+  var pw = $("#sym-pubwarn"), pr = $("#sym-pubrevoke");
+  var publicUnknown = state.publicEnabled && state.publicListState !== "ready";
+  pr.disabled = false;
+  if (publicUnknown) {
+    // Unknown public state must remain visible instead of looking like no public link.
+    $("#sym-pubtext").textContent = "Public status is unavailable";
+    $("#sym-pubexp").textContent = "unknown";
+    pr.checked = false; pr.disabled = true; pw.hidden = false;
+    mSym.dataset.pubslug = "";
+  } else if (pub) {
+    $("#sym-pubtext").textContent = "This item is also published externally";
+    var sd = Math.ceil((pub.expiry - Math.floor(Date.now() / 1000)) / 86400);
+    $("#sym-pubexp").textContent = pub.expired ? "expired" : ("D-" + sd);
+    pr.checked = false; pw.hidden = false;
+    mSym.dataset.pubslug = pub.slug;
+  } else { pw.hidden = true; mSym.dataset.pubslug = ""; }
+  mSym.classList.add("show");
+}
+$("#sym-confirm").addEventListener("click", function () {
+  var name = mSym.dataset.name;
+  var slug = mSym.dataset.pubslug;
+  var alsoRevoke = slug && $("#sym-pubrevoke").checked;
+  apiPost("/publish/api/unpublish", { name: name }).then(function (d) {
+    mSym.classList.remove("show");
+    if (!d.ok) { toast("Failed: " + (d.message || d.error || "error")); return; }
+    if (alsoRevoke) {
+      if (!ensurePublicListReady()) { load(); return; }
+      apiPost("/publish/api/public-revoke", { slug: slug }).then(function (r) {
+        if (r && r.ok) toast("Unpublished + public link revoked");
+        else toast("Unpublished (public revoke failed: " + ((r && (r.error || r.message)) || "error") + ")");
+        load();
+      }).catch(function () { toast("Unpublished (public revoke failed)"); load(); });
+    } else { toast("Unpublished " + name); load(); }
+  }).catch(function (e) { toast("Failed: " + e.message); });
+});
+
+// ---- batch ----
+function updateBatch() {
+  var n = keys(state.selected).length;
+  $("#selcount").textContent = n + " selected";
+  $("#dounpublish").disabled = n === 0;
+  var all = state.filtered.length > 0 && state.filtered.every(function (it) { return state.selected[it.name]; });
+  $("#selall").checked = all;
+}
+$("#selall").addEventListener("change", function (e) {
+  var on = e.target.checked;
+  state.filtered.forEach(function (it) { if (on) state.selected[it.name] = true; else delete state.selected[it.name]; });
+  render();
+});
+$("#selclear").addEventListener("click", function () {
+  if (!keys(state.selected).length) return;
+  state.selected = {}; render();
+});
+$$(".batchbar .age").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var days = parseInt(btn.dataset.days, 10) || 0;
+    var cutoff = Math.floor(Date.now() / 1000) - days * 86400;
+    var added = 0;
+    state.filtered.forEach(function (it) {
+      if (it.mtime_epoch && it.mtime_epoch <= cutoff && !state.selected[it.name]) { state.selected[it.name] = true; added++; }
+    });
+    render();
+    toast(added > 0 ? "+" + added + " selected (" + btn.textContent.trim() + ")" : "No items in that age range");
+  });
+});
+
+var mBatch = $("#m-batch");
+var batchPubRefs = [];
+var batchRequestSeq = 0;
+$("#dounpublish").addEventListener("click", function () {
+  batchRequestSeq += 1;
+  $("#batch-confirm").disabled = false;
+  var picked = state.items.filter(function (it) { return state.selected[it.name]; });
+  if (!picked.length) return;
+  var syms = picked.filter(function (it) { return it.isLink; });
+  var directs = picked.filter(function (it) { return !it.isLink && !it.isDir; });
+  var dirs = picked.filter(function (it) { return !it.isLink && it.isDir; });
+  var pubs = picked.filter(function (it) { return state.pubBySrc[it.name]; });
+  var publicUnknown = state.publicEnabled && state.publicListState !== "ready";
+  // Preserve the modal's source/slug identity across the asynchronous confirmation.
+  batchPubRefs = pubs.map(function (it) { return { name: it.name, slug: state.pubBySrc[it.name].slug }; });
+
+  function listHTML(arr) {
+    return '<div class="batch-list">' + arr.map(function (it) { return '<div class="li">' + esc(it.name) + "</div>"; }).join("") + "</div>";
+  }
+  var html = "";
+  if (syms.length) {
+    html += '<div class="batch-group sym"><div class="gh">' + syms.length + " symlink(s) — unpublish (original preserved)</div>" + listHTML(syms) + "</div>";
+    if (publicUnknown) {
+      // Batch unpublish must say when its public-link knowledge is unavailable.
+      html += '<div class="warn-box">Public status is unavailable; no public links will be revoked until the list is ready.</div>';
+    }
+  }
+  if (directs.length) {
+    html += '<div class="batch-group direct"><div class="gh">' + directs.length + " direct file(s) — permanent delete (unrecoverable)</div>" + listHTML(directs)
+      + '<label class="ack"><input type="checkbox" id="batch-ack"><span>I agree to <strong>permanently delete</strong> the ' + directs.length
+      + " direct file(s) above. (Unchecked: direct files are skipped and only symlinks are unpublished.)</span></label></div>";
+  }
+  if (pubs.length) {
+    html += '<div class="batch-group pub"><div class="gh">' + pubs.length + " also published externally — unpublishing here does not affect the public link</div>" + listHTML(pubs)
+      + '<label class="ack"><input type="checkbox" id="batch-pubrevoke"><span>Also <strong>revoke</strong> the ' + pubs.length + " public link(s) (immediate 404)</span></label></div>";
+  }
+  if (dirs.length) {
+    html += '<div class="batch-group skip"><div class="gh">' + dirs.length + " directory(ies) — skipped for safety (handle individually)</div>" + listHTML(dirs) + "</div>";
+  }
+  if (!syms.length && !directs.length) {
+    html = '<div class="batch-group skip"><div class="gh">No symlinks or direct files selected (directories only).</div></div>';
+  }
+  $("#batch-body").innerHTML = html;
+  mBatch.classList.add("show");
+});
+
+$("#batch-confirm").addEventListener("click", function () {
+  var ack = $("#batch-ack");
+  var includeDirect = !!(ack && ack.checked);
+  var revokeEl = $("#batch-pubrevoke");
+  var names = keys(state.selected);
+  var pubRefs = (revokeEl && revokeEl.checked)
+    ? batchPubRefs.slice() : [];
+  var requestSeq = batchRequestSeq;
+  var btn = $("#batch-confirm"); btn.disabled = true;
+  apiPost("/publish/api/unpublish-batch", { names: names, include_direct: includeDirect }).then(function (d) {
+    if (requestSeq !== batchRequestSeq) {
+      // A newer batch modal owns the shared controls; only reconcile its list here.
+      if (d && d.ok) load();
+      return;
+    }
+    btn.disabled = false;
+    // A failed batch contract must not become an "Unpublished 0 of N" success.
+    if (!d || !d.ok) {
+      mBatch.classList.remove("show");
+      toast("Failed: " + ((d && (d.error || d.message)) || "error"));
+      return;
+    }
+    mBatch.classList.remove("show");
+    var results = d.results || [];
+    var ok = d.ok_count != null ? d.ok_count : results.filter(function (r) { return r.ok; }).length;
+    var skipped = results.filter(function (r) { return r.kind === "direct-skipped" || r.kind === "dir"; }).length;
+    results.forEach(function (r) { if (r.ok) delete state.selected[r.name]; });
+    function done(revoked, revokeIssue) {
+      var msg = "Unpublished " + ok + " of " + (d.count != null ? d.count : names.length);
+      if (skipped) msg += ", " + skipped + " skipped";
+      if (pubRefs.length) {
+        msg += revokeIssue ? ", " + revoked + "/" + pubRefs.length + " public revokes completed" : ", " + revoked + " public revoked";
+      }
+      toast(msg); load();
+    }
+    if (pubRefs.length) {
+      if (!ensurePublicListReady()) { done(0, true); return; }
+      var currentRefs = pubRefs.filter(function (ref) {
+        var pub = state.pubBySrc[ref.name];
+        return pub && pub.slug === ref.slug;
+      });
+      if (currentRefs.length !== pubRefs.length) { done(0, true); return; }
+      Promise.all(currentRefs.map(function (ref) {
+        return apiPost("/publish/api/public-revoke", { slug: ref.slug }).then(function (r) {
+          return r && r.ok ? 1 : 0;
+        }, function () { return 0; });
+      })).then(function (counts) {
+        var revoked = counts.reduce(function (sum, count) { return sum + count; }, 0);
+        done(revoked, revoked !== currentRefs.length);
+      });
+    } else { done(0, false); }
+  }).catch(function (e) { btn.disabled = false; toast("Failed: " + e.message); });
+});
+
+// ---- repair ----
+$("#repair").addEventListener("click", function () {
+  var btn = this; btn.disabled = true;
+  apiPost("/publish/api/repair-broken", {}).then(function (d) {
+    btn.disabled = false;
+    var results = d.results || [];
+    if (!results.length) { toast("No broken links found"); return; }
+    var repaired = results.filter(function (r) { return r.action === "repair" && r.ok; }).length;
+    var unlinked = results.filter(function (r) { return r.action === "unlink" && r.ok; }).length;
+    toast("Repaired " + repaired + ", removed " + unlinked);
+    load();
+  }).catch(function (e) { btn.disabled = false; toast("Failed: " + e.message); });
+});
+
+// ---- upload ----
+var MAX_UPLOAD = 50 * 1024 * 1024;
+$("#upload").addEventListener("change", function (ev) {
+  var file = ev.target.files && ev.target.files[0];
+  ev.target.value = "";  // reset so re-selecting the same file fires again
+  if (!file) return;
+  if (file.size > MAX_UPLOAD) { toast("File too large (max 50 MB)"); return; }
+  var reader = new FileReader();
+  reader.onload = function () {
+    var res = String(reader.result || "");
+    var comma = res.indexOf(",");
+    var data = comma >= 0 ? res.slice(comma + 1) : res;
+    toast("Uploading " + file.name + "…");
+    apiPost("/publish/api/upload-share", { name: file.name, data: data }).then(function (d) {
+      if (d.ok) { toast("Uploaded " + d.name); load(); }
+      else toast("Upload failed: " + (d.error || "error"));
+    }).catch(function (e) { toast("Upload failed: " + e.message); });
+  };
+  reader.onerror = function () { toast("Could not read file"); };
+  reader.readAsDataURL(file);
+});
+
+// ---- filters / sort ----
+$("#search").addEventListener("input", function () { state.page = 1; render(); });
+$("#sort").addEventListener("change", function () { state.page = 1; render(); });
+
+// ---- external publish modal ----
+var mPub = $("#m-pub");
+// A delayed plan response is dangerous: its preselected child documents could
+// otherwise be attached to the next document opened in this reusable modal.
+// TESTABLE:BUNDLE_PLAN_STATE_START
+function newBundlePlanState() {
+  return { seq: 0, name: "", planId: "", plan: null, planStatus: "idle", publishSeq: 0,
+    modalSeq: 0, modalName: "", modalOpen: false };
+}
+function startBundlePlan(bundleState, name) {
+  bundleState.seq += 1;
+  bundleState.name = name;
+  bundleState.planId = "";
+  bundleState.plan = null;
+  bundleState.planStatus = "pending";
+  return bundleState.seq;
+}
+function acceptBundlePlanState(bundleState, seq, name, currentName, plan) {
+  if (seq !== bundleState.seq || bundleState.name !== name || currentName !== name || !plan || !plan.plan_id) return false;
+  bundleState.planId = plan.plan_id;
+  bundleState.plan = plan;
+  bundleState.planStatus = "ready";
+  return true;
+}
+function failBundlePlan(bundleState, seq, name, currentName) {
+  if (seq !== bundleState.seq || bundleState.name !== name || currentName !== name) return false;
+  bundleState.planId = "";
+  bundleState.plan = null;
+  bundleState.planStatus = "failed";
+  return true;
+}
+function clearBundlePlanState(bundleState) {
+  bundleState.seq += 1;
+  bundleState.name = "";
+  bundleState.planId = "";
+  bundleState.plan = null;
+  bundleState.planStatus = "idle";
+}
+function beginBundlePublishModal(bundleState, name) {
+  bundleState.modalSeq += 1;
+  bundleState.modalName = name;
+  bundleState.modalOpen = true;
+}
+function closeBundlePublishModal(bundleState) {
+  bundleState.modalName = "";
+  bundleState.modalOpen = false;
+  clearBundlePlanState(bundleState);
+}
+function bundlePublishSelection(bundleState, name, docs) {
+  // While planning, block the button instead of silently falling back to entry-only.
+  if (bundleState.planStatus === "pending") {
+    return { ok: false, error: "The bundle plan is still being prepared. Wait for planning to finish before publishing." };
+  }
+  if (!docs.length) return { ok: true, docs: [], planId: "" };
+  if (bundleState.name !== name || !bundleState.planId) {
+    return { ok: false, error: "The bundle plan is no longer valid. Close and reopen the publish dialog to plan again." };
+  }
+  return { ok: true, docs: docs, planId: bundleState.planId };
+}
+function startBundlePublish(bundleState, name) {
+  bundleState.publishSeq += 1;
+  return { seq: bundleState.publishSeq, name: name, modalSeq: bundleState.modalSeq };
+}
+function bundlePublishResponseState(bundleState, request, currentName) {
+  // A closed modal keeps its request session; only a newer modal session makes a late response stale.
+  if (request.seq !== bundleState.publishSeq || request.modalSeq !== bundleState.modalSeq) return "stale";
+  if (!bundleState.modalOpen && !currentName && !bundleState.modalName) return "closed";
+  if (bundleState.modalOpen && request.name === currentName && bundleState.modalName === currentName) return "open";
+  return "stale";
+}
+function isCurrentBundlePublish(bundleState, request, currentName) {
+  return bundlePublishResponseState(bundleState, request, currentName) !== "stale";
+}
+// TESTABLE:BUNDLE_PLAN_STATE_END
+
+var bundlePlanState = newBundlePlanState();
+function resetBundlePlan() {
+  clearBundlePlanState(bundlePlanState);
+  var field = $("#pub-bundle-field"), list = $("#pub-bundle-list"), diagnostics = $("#pub-bundle-diagnostics");
+  field.hidden = true;
+  list.dataset.name = "";
+  list.innerHTML = "";
+  diagnostics.hidden = true;
+  diagnostics.textContent = "";
+}
+function setBundleDiagnostics(plan) {
+  var messages = [];
+  if ((plan.missing || []).length) messages.push("Missing linked documents: " + plan.missing.join(", "));
+  if ((plan.fetch_failed || []).length) messages.push("Could not read linked documents: " + plan.fetch_failed.join(", "));
+  if (plan.truncated) messages.push("The candidate list was truncated at " + plan.max_docs + " documents.");
+  if ((plan.warnings || []).length) messages.push("Warnings: " + plan.warnings.join("\n"));
+  if ((plan.unsupported || []).length) messages.push("Unsupported linked documents: " + plan.unsupported.join(", "));
+  var diagnostics = $("#pub-bundle-diagnostics");
+  diagnostics.textContent = messages.join("\n");
+  diagnostics.hidden = !messages.length;
+}
+function loadBundlePlan(name) {
+  if (state.publicMode !== "local") return;
+  var field = $("#pub-bundle-field"), list = $("#pub-bundle-list"), note = $("#pub-bundle-note");
+  var seq = startBundlePlan(bundlePlanState, name);
+  // Lock Publish until local planning resolves so linked documents cannot be dropped.
+  $("#pub-go").disabled = true;
+  field.hidden = false;
+  list.dataset.name = "";
+  list.innerHTML = "";
+  note.textContent = "Planning linked documents…";
+  setBundleDiagnostics({});
+  apiPost("/publish/api/publish-plan", { entry: name }).then(function (d) {
+    if (seq !== bundlePlanState.seq || mPub.dataset.name !== name) return;
+    if (!d.ok || !d.result || !acceptBundlePlanState(bundlePlanState, seq, name, mPub.dataset.name, d.result)) {
+      failBundlePlan(bundlePlanState, seq, name, mPub.dataset.name);
+      $("#pub-go").disabled = false;
+      note.textContent = "Could not plan linked documents: " + (d.error || "unknown error") + ". This publication will include only the current document.";
+      return;
+    }
+    var plan = d.result;
+    var children = (plan.docs || []).filter(function (doc) { return !doc.entry; });
+    list.dataset.name = name;
+    note.textContent = children.length
+      ? "Select the linked documents to include in this single publication."
+      : "No additional linked documents were found.";
+    children.forEach(function (doc) {
+      var label = document.createElement("label");
+      var check = document.createElement("input");
+      check.type = "checkbox";
+      check.className = "pub-bundle-doc";
+      check.value = doc.name;
+      check.checked = true;
+      label.appendChild(check);
+      label.appendChild(document.createTextNode(doc.name + (doc.title ? " — " + doc.title : "")));
+      list.appendChild(label);
+    });
+    setBundleDiagnostics(plan);
+    $("#pub-go").disabled = false;
+  }).catch(function (e) {
+    if (seq !== bundlePlanState.seq || mPub.dataset.name !== name) return;
+    failBundlePlan(bundlePlanState, seq, name, mPub.dataset.name);
+    $("#pub-go").disabled = false;
+    note.textContent = "Could not plan linked documents: " + (e.message || "network error") + ". This publication will include only the current document.";
+  });
+}
+function selectedBundlePlan(name) {
+  var list = $("#pub-bundle-list");
+  var docs = $$(".pub-bundle-doc:checked", list).map(function (check) { return check.value; });
+  if (docs.length && list.dataset.name !== name) {
+    return { ok: false, error: "The bundle checklist belongs to another document. Close and reopen the publish dialog to plan again." };
+  }
+  return bundlePublishSelection(bundlePlanState, name, docs);
+}
+function syncPubModeForm() {
+  var gated = $("#pub-mode").value === "gated";
+  $("#pub-password-field").hidden = !gated;
+  if (!gated) $("#pub-password").value = "";
+}
+function openPubModal(name, requestedMode, ttlHours) {
+  // No publish source is trusted until the current public list is ready, including My Links rows.
+  if (!ensurePublicListReady()) return;
+  resetBundlePlan();
+  // Each open gets a new identity, so a previous document's response cannot enter it.
+  beginBundlePublishModal(bundlePlanState, name);
+  mPub.dataset.name = name;
+  mPub.dataset.url = "";
+  $("#pub-name").textContent = name;
+  $("#pub-result").hidden = true;
+  // Where the snapshot goes, and who enforces the duration.
+  $("#pub-dest").textContent = state.publicMode === "local"
+    ? "Served by this machine. The duration is enforced here — the page is deleted from disk when it expires."
+    : "Sent to your configured ingest service, which enforces the duration.";
+  $("#pub-ttl").disabled = false;
+  $("#pub-ttl").value = String(ttlHours || 336);
+  $("#pub-mode").disabled = false;
+  var gatedOption = $("#pub-mode").querySelector('option[value="gated"]');
+  var gatedUnavailable = state.publicMode !== "local" || !state.gatedEnabled;
+  var gatedReason = state.publicMode !== "local"
+    ? "Remote ingest does not enforce password gates; gated publishing is local-only."
+    : (state.gatedReason || "Gated publishing is unavailable.");
+  // Remote ingest rejects gated requests, so explain and disable the unsupported choice up front.
+  gatedOption.disabled = gatedUnavailable;
+  gatedOption.title = gatedUnavailable ? gatedReason : "";
+  var gatedNote = $("#pub-gated-note");
+  gatedNote.textContent = gatedReason;
+  gatedNote.hidden = !gatedUnavailable;
+  $("#pub-mode").value = requestedMode === "gated" &&
+    !gatedUnavailable ? "gated" : "open";
+  $("#pub-password").value = "";
+  syncPubModeForm();
+  var go = $("#pub-go"); go.disabled = false; go.hidden = false; go.textContent = "Publish";
+  mPub.classList.add("show");
+  if (state.publicMode === "local") loadBundlePlan(name);
+}
+$("#pub-mode").addEventListener("change", syncPubModeForm);
+$("#pub-go").addEventListener("click", function () {
+  var name = mPub.dataset.name;
+  if (!ensurePublicListReady()) return;
+  var ttl = parseInt($("#pub-ttl").value, 10);
+  var mode = $("#pub-mode").value;
+  var password = $("#pub-password").value;
+  if (mode === "gated" && !password) {
+    toast("Enter a password for the gated link.");
+    $("#pub-password").focus();
+    return;
+  }
+  var selection = selectedBundlePlan(name);
+  if (!selection.ok) { toast(selection.error); return; }
+  var body = { name: name, ttl_hours: ttl, mode: mode };
+  if (mode === "gated") body.password = password;
+  if (selection.docs.length) {
+    body.docs = [name].concat(selection.docs);
+    body.plan_id = selection.planId;
+  }
+  var go = this, hasBundle = selection.docs.length > 0, publishRequest = startBundlePublish(bundlePlanState, name);
+  go.disabled = true; go.textContent = "Publishing…";
+  apiPost("/publish/api/publish-public", body).then(function (d) {
+    var responseState = bundlePublishResponseState(bundlePlanState, publishRequest, mPub.dataset.name);
+    if (responseState === "stale") {
+      // A stale modal response must not touch the new dialog, but a successful write still needs list reconciliation.
+      if (d && d.ok) load();
+      return;
+    }
+    if (!d.ok) {
+      if (responseState === "closed") { toast("Failed: " + (d.error || "error")); return; }
+      go.disabled = false; go.textContent = "Publish";
+      var error = d.error || "error";
+      if (hasBundle || /bundle plan|source changed after bundle plan/i.test(error)) error += ". The bundle plan is single-use and short-lived; close and reopen this dialog to plan again.";
+      toast("Failed: " + error);
+      return;
+    }
+    var r = d.result || {};
+    if (responseState === "closed") {
+      // The modal closing is harmless; a newer modal session would have been "stale" above.
+      toast((r.mode === "gated" ? "Gated link published: " : "Published externally: ") + (r.url || "successfully"));
+      load();
+      return;
+    }
+    var a = $("#pub-url"); a.href = r.url || "#"; a.textContent = r.url || "";
+    $("#pub-expiry").textContent = r.expiry ? "Expires " + new Date(r.expiry * 1000).toLocaleString() : "";
+    $("#pub-result").hidden = false;
+    $("#pub-ttl").disabled = true;
+    $("#pub-mode").disabled = true;
+    $("#pub-password").value = "";
+    go.hidden = true;
+    mPub.dataset.url = r.url || "";
+    var plan = bundlePlanState.plan || {};
+    setBundleDiagnostics({
+      missing: plan.missing || [], fetch_failed: plan.fetch_failed || [],
+      truncated: plan.truncated, max_docs: plan.max_docs, warnings: r.warnings || [],
+      unsupported: plan.unsupported || []
+    });
+    toast((r.mode === "gated" ? "Gated link published" : "Published externally") + ((r.bundle || []).length ? " with " + r.bundle.length + " documents" : ""));
+    load();
+  }).catch(function (e) {
+    var responseState = bundlePublishResponseState(bundlePlanState, publishRequest, mPub.dataset.name);
+    if (responseState === "stale") return;
+    if (responseState === "closed") { toast("Failed: " + e.message); return; }
+    go.disabled = false; go.textContent = "Publish"; toast("Failed: " + e.message);
+  });
+});
+$("#pub-copy").addEventListener("click", function () { copyAndToast(mPub.dataset.url || $("#pub-url").href); });
+
+// ---- settings ----
+$("#settings").addEventListener("click", openSettings);
+$("#set-copy").addEventListener("click", function () { copyAndToast($("#set-prompt").textContent); });
+$("#set-domain-copy").addEventListener("click", function () { copyAndToast($("#set-domain-prompt").textContent); });
+
+// ---- share popover / row menu ----
+// One element, rebuilt from state. The popover never holds truth: what is live comes from
+// the public list, and `draft` is only which visibility the person is looking at.
+function popPub(name) { return state.pubBySrc[name]; }
+function popCurrent(pub) { return pub && !pub.expired ? (pub.mode === "gated" ? "pw" : "link") : "me"; }
+function remainingHours(pub) { return pub ? Math.max(1, Math.ceil((pub.expiry - Math.floor(Date.now() / 1000)) / 3600)) : 336; }
+function hostOf(url) { return String(url || "").replace(/^https?:\/\//, "").replace(/\/.*$/, ""); }
+
+function openPop(kind, name, btn) {
+  if (pop && pop.kind === kind && pop.name === name) { closePop(); return; }
+  pop = { kind: kind, name: name, draft: null, btn: btn };
+  renderPop();
+}
+function closePop() { pop = null; $("#pop").hidden = true; }
+
+function renderPop() {
+  var el = $("#pop");
+  // A reload clears the public list for a moment; keep showing the last state instead of flashing "checking".
+  if (pop && pop.kind === "share" && state.publicListState === "loading" && !el.hidden && el.dataset.for === pop.name) return;
+  var btn = pop && $('[data-act="' + (pop.kind === "menu" ? "more" : "share") + '"][data-name="' + CSS.escape(pop.name) + '"]');
+  if (!pop || !btn) { closePop(); return; }
+  el.className = pop.kind === "menu" ? "menu" : "";
+  el.innerHTML = pop.kind === "menu" ? menuHTML(pop.name) : shareHTML(pop.name);
+  el.hidden = false; el.dataset.for = pop.name;
+  var r = btn.getBoundingClientRect();
+  // Below the button, or above it when the page would run out under the popover.
+  var below = r.bottom + 8 + el.offsetHeight <= window.innerHeight || r.top < el.offsetHeight + 16;
+  el.style.top = (below ? r.bottom + window.scrollY + 8 : r.top + window.scrollY - 8 - el.offsetHeight) + "px";
+  el.style.left = Math.max(8, Math.min(r.right + window.scrollX - el.offsetWidth, document.documentElement.clientWidth - el.offsetWidth - 8)) + "px";
+}
+
+function menuHTML(name) {
+  var it = state.items.find(function (x) { return x.name === name; }) || {};
+  var out = "";
+  if (state.docURL) out += '<button class="menu-item" data-ma="copy">Copy link for teammates</button>';
+  if (it.isLink) out += '<button class="menu-item danger" data-ma="unpublish">Unpublish</button>';
+  else if (!it.isDir) out += '<button class="menu-item danger" data-ma="delete">Delete file…</button>';
+  return out;
+}
+
+function shareHTML(name) {
+  var pub = popPub(name), cur = popCurrent(pub), d = pop.draft || cur;
+  var head = '<div class="ttl">' + esc((pub && pub.title) || name) + "</div>";
+  if (state.publicListState !== "ready") {
+    return '<div class="pb">' + head + '<div class="od">'
+      + esc(state.publicListState === "loading" ? "Checking public status…" : "Public status unavailable: " + state.publicListError) + "</div></div>";
+  }
+  var pwOff = state.publicMode !== "local" || !state.gatedEnabled;
+  var pwWhy = state.publicMode !== "local" ? "Remote ingest does not enforce password gates; gated publishing is local-only."
+    : (state.gatedReason || "Gated publishing is unavailable.");
+  var seg = [["me", "Only me"], ["link", "Anyone with link"], ["pw", "Password"]].map(function (m) {
+    return '<button data-pm="' + m[0] + '" class="' + (d === m[0] ? "on" : "") + '"'
+      + (m[0] === "pw" && pwOff ? ' disabled title="' + esc(pwWhy) + '"' : "") + ">" + m[1] + "</button>";
+  }).join("");
+  var body = "";
+  var pwField = '<div class="orow"><div>Password<div class="od">Only a hash is stored</div></div>'
+    + '<input type="password" id="pop-pw" autocomplete="new-password" style="width:150px"></div>';
+  var bundle = state.publicMode === "local" ? '<button class="linkbtn" data-pa="bundle">Include linked documents…</button>' : "";
+  if (d === "me") {
+    body = cur === "me"
+      ? '<div class="orow"><div>Not on the web.<div class="od">'
+        + (pub ? "The previous link expired." : "Teammates on your tailnet can still open the file.")
+        + '</div></div><button class="btn primary sm" data-pa="publish">Publish</button></div>' + bundle
+      : '<div class="od">Unpublish below to take this page off the web.</div>';
+  } else if (d === cur) {
+    var days = Math.ceil((pub.expiry - Math.floor(Date.now() / 1000)) / 86400);
+    var it = state.items.find(function (x) { return x.name === name; });
+    var stale = !!(it && snapAt(pub) && it.mtime_epoch && it.mtime_epoch > snapAt(pub));
+    body = '<div class="live"><span class="dot"></span><b>Live on the web</b>'
+      + (snapAt(pub) ? '<span class="od">· snapshot ' + esc(relTime(snapAt(pub))) + "</span>" : "") + "</div>"
+      + '<div class="urlbox"><input readonly value="' + esc(pub.url) + '" aria-label="link"><button class="btn sm primary" data-pa="copy">Copy</button></div>'
+      + '<div class="orow"><div>Link expires</div><select id="pop-exp" aria-label="link expiry"><option value="">in ' + days + " day" + (days === 1 ? "" : "s") + "</option>"
+      + [[24, "24 hours"], [168, "7 days"], [336, "14 days"], [720, "30 days"]].map(function (o) { return '<option value="' + o[0] + '">reset to ' + o[1] + "</option>"; }).join("")
+      + "</select></div>";
+    if (d === "link") {
+      var ix = state.indexing;
+      body += '<div class="orow"><div>Search engine indexing<div class="od">'
+        + esc(ix.available ? (pub.indexed ? "On: search engines may list this page" : "Off = noindex; only people with the link find it") : ix.reason)
+        + '</div></div><button class="tg" role="switch" data-pa="index" aria-label="Search engine indexing" aria-checked="' + (pub.indexed ? "true" : "false") + '"'
+        + (ix.available ? "" : " disabled") + "></button></div>";
+    }
+    if (stale) {
+      body += '<div class="warnline"><div class="orow"><span>Source changed after this snapshot</span><button class="btn sm" data-pa="publish">Update</button></div>'
+        + (d === "pw" ? pwField : "") + "</div>";
+    } else if (d === "pw") {
+      body += '<div class="od">To change the password, enter a new one and press Update.</div>' + pwField
+        + '<div class="orow"><span></span><button class="btn sm" data-pa="publish">Update</button></div>';
+    }
+    body += bundle;
+  } else {
+    // Publishing for the first time, or switching between link and password.
+    body = '<div class="orow"><div>Link expires</div><select id="pop-ttl" aria-label="link expiry">' + ttlOptions(336) + "</select></div>"
+      + (d === "pw" ? pwField : "")
+      + '<div class="orow"><span></span><button class="btn primary sm" data-pa="publish">'
+      + (cur === "me" ? "Publish" : (d === "pw" ? "Switch to password" : "Switch to link")) + "</button></div>" + bundle;
+  }
+  var dest = state.site && state.site.destination === "funnel" ? "Tailscale Funnel" : hostOf(state.site && state.site.base_url) || "this machine";
+  var foot = pub ? '<button class="btn sm danger" data-pa="unpublish">' + (pub.expired ? "Remove" : "Unpublish") + "</button>" : "";
+  return '<div class="pb">' + head + '<div class="seg">' + seg + "</div>" + body + "</div>"
+    + '<div class="pf"><span>Destination · <b>' + esc(dest) + "</b></span>" + foot + "</div>";
+}
+
+function popDone(d, okMsg) {
+  if (d && d.ok) { pop && (pop.draft = null); toast(okMsg); load(); }
+  else toast("Failed: " + ((d && (d.error || d.message)) || "error"));
+}
+function popPublish(btn) {
+  var name = pop.name, pub = popPub(name), cur = popCurrent(pub), d = pop.draft || cur;
+  var mode = d === "pw" ? "gated" : "open";
+  // A snapshot with linked documents is rebuilt through the dialog that plans them, so Update cannot drop them.
+  if (pub && pub.bundled && cur !== "me") { closePop(); openPubModal(name, mode, remainingHours(pub)); return; }
+  var pw = $("#pop-pw") ? $("#pop-pw").value : "";
+  if (mode === "gated" && !pw) { toast("Enter a password for the link."); $("#pop-pw").focus(); return; }
+  var ttl = $("#pop-ttl") ? parseInt($("#pop-ttl").value, 10) : (d === cur ? remainingHours(pub) : 336);
+  var body = { name: name, ttl_hours: ttl, mode: mode };
+  if (mode === "gated") body.password = pw;
+  btn.disabled = true;
+  apiPost("/publish/api/publish-public", body).then(function (r) {
+    btn.disabled = false;
+    popDone(r, cur === "me" ? "Published" : "Updated");
+  }).catch(function (e) { btn.disabled = false; toast("Failed: " + e.message); });
+}
+
+$("#pop").addEventListener("click", function (ev) {
+  ev.stopPropagation(); // the popover re-renders itself; the outside-click closer must not see a detached target
+  var b = ev.target.closest("button");
+  if (!b || !pop) return;
+  var pub = popPub(pop.name);
+  if (b.dataset.ma) {
+    var name = pop.name; closePop();
+    if (b.dataset.ma === "copy") copyAndToast(state.docURL + "/" + encodeURIComponent(name));
+    else if (b.dataset.ma === "unpublish") openSymModal(name);
+    else if (b.dataset.ma === "delete") { state.confirming[name] = true; render(); }
+    return;
+  }
+  if (b.dataset.pm) { pop.draft = b.dataset.pm; renderPop(); return; }
+  var act = b.dataset.pa;
+  if (act === "publish") popPublish(b);
+  else if (act === "copy") copyAndToast(pub.url);
+  else if (act === "bundle") {
+    var name2 = pop.name, mode = (pop.draft || popCurrent(pub)) === "pw" ? "gated" : "open"; closePop(); openPubModal(name2, mode, pub && !pub.expired ? remainingHours(pub) : 336);
+  } else if (act === "unpublish") {
+    if (!ensurePublicListReady()) return;
+    pop.draft = null; doRevoke(pub.slug);
+  } else if (act === "index") {
+    b.disabled = true;
+    apiPost("/publish/api/public-set-indexed", { slug: pub.slug, indexed: !pub.indexed }).then(function (d) {
+      popDone(d, pub.indexed ? "Search engines will not index this page" : "Search engines may now index this page");
+    }).catch(function (e) { b.disabled = false; toast("Failed: " + e.message); });
+  }
+});
+$("#pop").addEventListener("change", function (ev) {
+  if (ev.target.id !== "pop-exp" || !ev.target.value || !pop) return;
+  var pub = popPub(pop.name);
+  apiPost("/publish/api/public-set-expiry", { slug: pub.slug, ttl_hours: parseInt(ev.target.value, 10) })
+    .then(function (d) { popDone(d, "Expiry updated"); })
+    .catch(function (e) { toast("Failed: " + e.message); });
+});
+document.addEventListener("click", function (ev) {
+  if (pop && !ev.target.closest("#pop") && !ev.target.closest('[data-act="share"],[data-act="more"]')) closePop();
+});
+document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") closePop(); });
+window.addEventListener("resize", closePop);
+
+// ---- tabs ----
+$$("#tabs button").forEach(function (b) {
+  b.addEventListener("click", function () {
+    state.view = b.dataset.view;
+    state.page = 1;
+    $$("#tabs button").forEach(function (x) { x.classList.toggle("on", x === b); });
+    render();
+  });
+});
+
+// ---- modal close ----
+function closeModal(modal) {
+  if (modal === mPub) {
+    closeBundlePublishModal(bundlePlanState);
+    mPub.dataset.name = "";
+    mPub.dataset.url = "";
+    $("#pub-password").value = "";
+  }
+  modal.classList.remove("show");
+}
+$$("[data-close]").forEach(function (b) {
+  b.addEventListener("click", function () { $$(".modal-bg").forEach(closeModal); });
+});
+$$(".modal-bg").forEach(function (m) {
+  m.addEventListener("click", function (e) { if (e.target === m) closeModal(m); });
+});
+
+// ---- init ----
+load();
+</script>
+<script src="/assets/porthole.js" defer></script>
+</body>
+</html>

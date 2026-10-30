@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Send a StationDesk inbox card through the local atomic spool."""
+import argparse
+import json
+import os
+from pathlib import Path
+import tempfile
+import uuid
+
+
+def emit(root, card):
+    spool = Path(root) / 'state/cards-spool'
+    for name in ('tmp', 'new', 'bad'):
+        (spool / name).mkdir(parents=True, exist_ok=True, mode=0o700)
+    card = dict(card, id=uuid.uuid4().hex)
+    fd, temporary = tempfile.mkstemp(dir=spool / 'tmp')
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(card, stream, ensure_ascii=False)
+            stream.write('\n')
+        os.link(temporary, spool / 'new' / (card['id'] + '.json'))
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return card['id']
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--group')
+    parser.add_argument('--level', choices=('normal', 'urgent'), default='normal')
+    parser.add_argument('--title')
+    for name in ('body', 'link', 'cwd', 'prompt'):
+        parser.add_argument('--' + name)
+    parser.add_argument('--peek', action='store_true')
+    parser.add_argument('--resolves', action='store_true')
+    # systemd supplies SERVICE_RESULT to ExecStopPost even for auto restarts.
+    parser.add_argument('--unit-result', help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.unit_result:
+        if os.environ.get('SERVICE_RESULT', 'success') == 'success':
+            return
+        card = {'group': 'unit:' + args.unit_result, 'source': 'systemd',
+                'level': 'urgent', 'title': 'App unit failed: ' + args.unit_result,
+                'body': 'systemd result: ' + os.environ['SERVICE_RESULT'], 'peek': True}
+    else:
+        if not args.group or not args.title:
+            parser.error('--group and --title are required')
+        card = {key: getattr(args, key) for key in ('group', 'level', 'title', 'peek')}
+        if args.resolves:
+            card['resolves'] = args.group
+        card['source'] = 'stationdesk-card'
+        for key in ('body', 'link'):
+            if getattr(args, key) is not None:
+                card[key] = getattr(args, key)
+        if args.cwd and not args.prompt:
+            parser.error('--cwd requires --prompt')
+        if args.prompt:
+            card['run'] = {'cwd': args.cwd or str(Path.cwd()), 'prompt': args.prompt}
+    root = os.environ.get('STATIONDESK_ROOT') or Path(__file__).resolve().parent.parent
+    print(emit(root, card))
+
+
+if __name__ == '__main__':
+    main()

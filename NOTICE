@@ -1,0 +1,66 @@
+Copyright Spacewalk
+StationDesk's own code is licensed under the GNU Affero General Public License
+v3.0 (AGPL-3.0), except where a file or component explicitly states otherwise.
+For commercial licensing inquiries, contact Spacewalk via the project repository.
+Third-party code keeps the licenses and notices listed below.
+
+Fileview (apps/fileview/static/vendor/NOTICE):
+- highlight.js 11.11.1 — BSD-3-Clause; marked 15.0.12 — MIT;
+  DOMPurify 3.4.8 — Apache-2.0 OR MPL-2.0; Markwand CSS structure — MIT.
+  Full texts are beside the vendor files; their original headers are retained.
+- filebrowser 2.63.18 — Apache-2.0; downloaded at install, not bundled.
+  https://github.com/filebrowser/filebrowser
+
+Devterm (apps/devterm/web/vendor/LICENSE.xterm):
+- xterm.js and fit, web-links, unicode11 addons — MIT.
+  https://github.com/xtermjs/xterm.js
+- Symbols Nerd Font — upstream notice beside the font.
+- ttyd — MIT; installed from Ubuntu apt, not bundled.
+  https://github.com/tsl0922/ttyd
+
+Paseo (apps/paseo/):
+- The seven @getpaseo 0.8.0 npm archives derive from getpaseo/paseo v0.8.0,
+  commit b8e24677e12b226c7c38c1c3a40649daa9f1152f — Apache-2.0.
+  Upstream license: vendor/guarded-0.8.0/UPSTREAM-LICENSE; modifications and
+  install-time overlay source: vendor/guarded-0.8.0/source/ and patches/.
+  StationDesk's own guarded overlay is AGPL-3.0-only; this does not replace
+  the Apache-2.0 license for upstream portions. See both directories' READMEs.
+  The server archive includes WEB-THIRD-PARTY-LICENSES.txt; the same inventory
+  is in vendor/guarded-0.8.0/, with exact sources and identified supplements.
+- agy-acp derives from sibbl/google-antigravity-acp d3a0163 (1.1.1), MIT,
+  Copyright (c) 2026 Antigravity ACP Contributors. Upstream license and source:
+  agy-acp/LICENSE and agy-acp/src/. StationDesk modifications are AGPL-3.0-only;
+  files with an explicit separate license retain that license.
+
+Orca (apps/orca/):
+- Orca ADE runtime — MIT, Copyright (c) 2026 Lovecast Inc.; sha-pinned
+  AppImage downloaded at install, not bundled. https://github.com/stablyai/orca
+- The modified static web client derives from v1.4.139, commit
+  0ab2e001d16839f5c95cbda84fffb46f08e77359. Upstream and local modifications
+  are MIT; see web-bundle/LICENSE and web-bundle/README.md.
+- Exact browser package versions and full notices, including Apache-2.0 PDF.js,
+  MIT Monaco/TypeScript, and Oniguruma, are in web-bundle/licenses/.
+  Font notices include Geist/KaTeX OFL-1.1, Symbols Nerd Font MIT, and
+  Codicons CC-BY-4.0. See the package and asset manifests there.
+- apps/orca/orca.png is the upstream logo used to identify Orca; it is Orca's
+  trademark, not StationDesk's.
+
+CAD (apps/cad/licenses/NOTICE):
+- CAD Craft source — MIT OR Apache-2.0. The web build and unmodified CLI
+  extracted from the upstream v0.6.2 Debian package have separate exact source
+  and lockfile records in that directory, with their full dependency notices.
+- The CLI includes acadrust 0.6.3 — MPL-2.0; source and modification information
+  is in the component NOTICE and CLI-THIRD-PARTY-LICENSES.txt.
+- Bundled fonts retain OFL-1.1, UFL-1.0 and MIT notices as applicable; see the
+  font license files and WEB-THIRD-PARTY-LICENSES.txt.
+
+Bench list icons (apps/bench/icons/licenses/README.md):
+- Nine unmodified PhotoCraft, VectorCraft, DesignCraft, PdfCraft, LightCraft,
+  FilmCraft, EffectCraft, FigCraft and SoundCraft icons — MIT OR Apache-2.0,
+  Copyright 2026 ArtCraft Team and respective contributors. Exact tag/commit
+  mappings and all original LICENSE-MIT, LICENSE-APACHE and NOTICE texts are
+  in that directory. The applications themselves are downloaded at install.
+
+Node.js is downloaded at install, not bundled in this source snapshot.
+Its upstream distribution includes its own LICENSE and third-party notices.
+https://nodejs.org/

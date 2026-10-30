@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Only the operating system asks for an administrator password.
+exec /usr/bin/pkexec /usr/bin/sudo -n "$@"

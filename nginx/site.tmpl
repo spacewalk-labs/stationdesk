@@ -1,0 +1,13 @@
+server {
+    listen 127.0.0.1:${PORT};
+    server_name _;
+    if ($$http_tailscale_user_login != ${OWNER}) { return 403; }
+    error_page 403 =403 @wrong_owner;
+    location @wrong_owner {
+        # Static error pages reject POST with 405; preserve the owner denial.
+        if ($$request_method !~ "^(GET|HEAD)$$") { return 403 "Owner access required"; }
+        root "${ROOT}/web/hub";
+        try_files /wrong-owner.html =403;
+    }
+${INCLUDES}
+}

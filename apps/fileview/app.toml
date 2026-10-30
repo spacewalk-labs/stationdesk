@@ -1,0 +1,6 @@
+label = "File Viewer"
+description = "File browsing and editing"
+description_ko = "파일 탐색·편집"
+icon = "icon.svg"
+port = 19921
+files = ["runtime/fileview", "web/fileview"]

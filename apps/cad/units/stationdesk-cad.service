@@ -1,0 +1,8 @@
+[Unit]
+Description=StationDesk drawing library
+[Service]
+ExecStart=/usr/bin/python3 -B ${STATIONDESK_APP_DIR}/backend.py
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=default.target

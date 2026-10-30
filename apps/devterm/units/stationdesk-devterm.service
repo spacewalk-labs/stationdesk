@@ -1,0 +1,12 @@
+[Unit]
+Description=StationDesk terminal and secret drop
+Wants=stationdesk-devterm-ttyd.service
+After=stationdesk-devterm-ttyd.service
+[Service]
+ExecStart=/usr/bin/python3 /opt/stationdesk/apps/devterm/backend/devterm-gate.py
+# tmux servers and their panes outlive the web gate.
+KillMode=process
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=default.target

@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CAD</title>
+<link rel="icon" type="image/svg+xml" href="/cad/cad.svg">
+<link rel="stylesheet" href="/assets/stationdesk-tokens.css">
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden}body{display:flex;background:var(--stationdesk-canvas);color:var(--stationdesk-body);font:13px/1.5 var(--stationdesk-font)}button,a,input{font:inherit}button{cursor:pointer;color:inherit;background:none;border:0}button:hover,a:hover{background:var(--stationdesk-surface-2)}button:focus-visible,a:focus-visible,input:focus-visible{outline:0;box-shadow:var(--stationdesk-focus)}button:disabled{cursor:default;color:var(--stationdesk-mute)}
+#drawer{width:248px;flex:none;display:flex;flex-direction:column;background:var(--stationdesk-surface-1);border-right:1px solid var(--stationdesk-hairline)}header{height:44px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--stationdesk-hairline)}header img{width:20px;height:20px;flex:none}header strong{color:var(--stationdesk-ink);flex:1}#toggle{width:24px;height:28px;font-size:20px;flex:none}.contents{display:flex;flex:1;min-height:0;flex-direction:column}.toolbar{display:flex;align-items:center;padding:6px;gap:2px;border-bottom:1px solid var(--stationdesk-hairline)}.toolbar button{padding:5px 6px;white-space:nowrap;font-size:12px}#drawer.hot{background:var(--stationdesk-surface-2)}#folders{overflow:auto;flex:1;padding:6px 0}#folders p{padding:0 12px;color:var(--stationdesk-mute)}.folder{width:100%;text-align:left;padding:7px 12px;font-weight:600;color:var(--stationdesk-body);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.folder.selected{background:var(--stationdesk-surface-2)}.row{display:flex;align-items:center;height:28px;padding:0 6px 0 10px;border-left:2px solid transparent;gap:6px}.row.opened{border-left-color:var(--stationdesk-primary);background:var(--stationdesk-surface-2)}.file{display:flex;align-items:center;gap:7px;min-width:0;flex:1;height:100%;text-align:left;padding:0}.name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tag{width:30px;flex:none;text-align:center;font-size:10px;color:var(--stationdesk-mute)}.download{display:flex;align-items:center;color:var(--stationdesk-mute);text-decoration:none;padding:4px;opacity:0}.download svg{width:16px;height:16px}.row:hover .download,.row:focus-within .download,.row.opened .download{opacity:1}
+#drawer.collapsed{width:44px}#drawer.collapsed header{position:relative;padding:0 12px}#drawer.collapsed header strong,#drawer.collapsed .contents{display:none}#drawer.collapsed #toggle{position:absolute;top:44px;left:8px}#editor{min-width:0;flex:1;border:0;height:100%}#toast{position:fixed;right:24px;top:54px;max-width:min(480px,80vw);padding:10px 14px;border:1px solid var(--stationdesk-hairline);border-radius:var(--stationdesk-r-sm);background:var(--stationdesk-surface-1);color:var(--stationdesk-ink);box-shadow:var(--stationdesk-shadow);white-space:pre-wrap;overflow-wrap:anywhere}#toast.error{border-color:var(--stationdesk-danger);color:var(--stationdesk-danger)}
+dialog{width:min(360px,90vw);padding:20px;background:var(--stationdesk-surface-1);color:var(--stationdesk-ink);border:1px solid var(--stationdesk-hairline);border-radius:var(--stationdesk-r-sm);box-shadow:var(--stationdesk-shadow)}dialog h2{margin:0 0 16px;font-size:16px}dialog label{display:block;color:var(--stationdesk-body)}dialog input{display:block;width:100%;margin:6px 0 20px;padding:8px;background:var(--stationdesk-canvas);color:var(--stationdesk-ink);border:1px solid var(--stationdesk-hairline);border-radius:var(--stationdesk-r-sm)}.actions{display:flex;justify-content:flex-end;gap:8px}.actions button{padding:6px 12px;border-radius:var(--stationdesk-r-sm)}[hidden]{display:none!important}
+
+#drawings-panel{display:flex;flex-direction:column;min-height:0;flex:1}
+.folder-row{display:flex;align-items:center;padding-right:6px}.folder-row .folder{flex:1;min-width:0}.more{padding:2px 5px;color:var(--stationdesk-mute);opacity:0;font-size:18px;line-height:22px}.row:hover .more,.row:focus-within .more,.folder-row:hover .more,.folder-row:focus-within .more{opacity:1}.rename-input{min-width:0;width:100%;padding:1px 3px;background:var(--stationdesk-canvas);color:var(--stationdesk-ink);border:1px solid var(--stationdesk-primary)}.rename-extension{flex:none;color:var(--stationdesk-mute)}#file-menu{position:fixed;z-index:2;min-width:130px;padding:4px;border:1px solid var(--stationdesk-hairline);border-radius:var(--stationdesk-r-sm);background:var(--stationdesk-surface-1);box-shadow:var(--stationdesk-shadow)}#file-menu button{display:block;text-align:left;width:100%;padding:6px 12px}#file-menu button:last-child{color:var(--stationdesk-danger)}#toast button{margin-left:12px;color:var(--stationdesk-primary);text-decoration:underline}
+</style>
+</head>
+<body>
+<aside id="drawer" aria-label="Drawings">
+<header><img src="/cad/cad.svg" alt="" title="Saved on this box only"><strong>Drawings</strong><button id="toggle" aria-label="Collapse drawings" aria-expanded="true">‹</button></header>
+<div class="contents">
+<section id="drawings-panel" aria-label="Drawing library">
+<div class="toolbar"><button id="upload">Upload</button><button id="new-folder">New folder</button><button id="save-as" disabled>Save as…</button><input id="files" type="file" accept=".dxf,.dwg" multiple hidden></div>
+<div id="folders"></div>
+</section>
+</div>
+</aside>
+<iframe id="editor" title="CADCraft drawing editor"></iframe>
+<dialog id="save-dialog" aria-labelledby="save-title">
+<form id="save-form">
+<h2 id="save-title">Save as…</h2>
+<label for="save-name">File name (.dxf)</label><input id="save-name" name="name" required autocomplete="off">
+<div class="actions"><button type="button" id="save-cancel">Cancel</button><button type="submit">Save</button></div>
+</form>
+</dialog>
+<div id="file-menu" role="menu" aria-label="Drawing actions" hidden></div>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const editor = $('editor');
+const nameFolders = new Map();
+const documentPaths = new Map();
+const failedSaves = new Set();
+let selectedFolder = '', openedPath = '', ready = false, pendingOpen = null, activeDocument = null;
+let openingPath = null;
+let engineDirty = false, pendingSaves = 0, saveQueue = Promise.resolve(), toastTimer, nextSaveAs = null;
+function toast(message, error = false) {
+  clearTimeout(toastTimer);
+  $('toast').textContent = message;
+  $('toast').classList.toggle('error', error);
+  $('toast').hidden = false;
+  if (!error) toastTimer = setTimeout(() => { $('toast').hidden = true; }, 4500);
+}
+function apiURL(action, path) {
+  return '/cad/api/' + action + (path === undefined ? '' : '?path=' + encodeURIComponent(path));
+}
+async function request(action, path, options, upload = false) {
+  const response = await fetch(apiURL(action, path) + (upload ? '&upload=1' : ''), options);
+  if (!response.ok) {
+    const text = await response.text();
+    let message = text;
+    try { const data = JSON.parse(text); message = data.error || text; } catch (_) {}
+    throw new Error(message || "Request failed (" + response.status + ')');
+  }
+  return response;
+}
+function sendOpen(drawing) {
+  openingPath = drawing.path;
+  editor.contentWindow.postMessage({type:'cadcraft:open', name:drawing.name, bytes:drawing.bytes}, location.origin);
+}
+async function openPath(path) {
+  try {
+    const bytes = await (await request('file', path)).arrayBuffer();
+    const name = path.slice(path.indexOf('/') + 1);
+    nameFolders.set(name, path.slice(0, path.indexOf('/')));
+    const drawing = {name, bytes, path};
+    if (ready) sendOpen(drawing); else pendingOpen = drawing;
+    document.querySelectorAll('.row').forEach(row => row.classList.toggle('opened', row.dataset.path === openedPath));
+  } catch (error) { toast("Couldn't open · " + error.message, true); }
+}
+async function fileAction(action, data) {
+  return (await request(action, undefined, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)})).json();
+}
+function containsOpen(path) { return openedPath === path || openedPath.startsWith(path + '/'); }
+function canRename(path) {
+  if (containsOpen(path) && engineDirty) { toast('Save first', true); return false; }
+  return true;
+}
+function startRename(path, label, folder) {
+  if (label.querySelector('input') || !canRename(path)) return;
+  const oldName = path.slice(path.lastIndexOf('/') + 1);
+  const suffix = folder ? '' : oldName.slice(oldName.lastIndexOf('.'));
+  const input = document.createElement('input'); input.className = 'rename-input';
+  input.setAttribute('aria-label', 'Rename ' + oldName);
+  input.value = oldName.slice(0, oldName.length - suffix.length);
+  const original = Array.from(label.childNodes);
+  label.replaceChildren(input);
+  if (suffix) { const extension = document.createElement('span'); extension.className = 'rename-extension'; extension.textContent = suffix; label.append(extension); }
+  input.onclick = event => event.stopPropagation();
+  input.ondblclick = event => event.stopPropagation();
+  input.onkeydown = async event => {
+    event.stopPropagation();
+    if (event.key === 'Escape') { event.preventDefault(); label.replaceChildren(...original); label.focus(); }
+    if (event.key !== 'Enter' || event.isComposing || input.disabled) return;
+    event.preventDefault();
+    const name = input.value.trim();
+    if (!name) return;
+    const to = folder ? name : path.slice(0, path.lastIndexOf('/') + 1) + name + suffix;
+    if (to === path) { label.replaceChildren(...original); label.focus(); return; }
+    input.disabled = true;
+    try {
+      await saveQueue;
+      if (!canRename(path)) return;
+      await fileAction('rename', {from:path, to});
+      const reopen = containsOpen(path);
+      const renamedOpen = folder ? to + openedPath.slice(path.length) : to;
+      for (const [id, documentPath] of documentPaths) {
+        if (documentPath === path || (folder && documentPath.startsWith(path + '/'))) {
+          documentPaths.set(id, to + documentPath.slice(path.length));
+        }
+      }
+      if (folder) {
+        if (selectedFolder === path) selectedFolder = to;
+        for (const [file, project] of nameFolders) if (project === path) nameFolders.set(file, to);
+      }
+      if (reopen) await openPath(renamedOpen);
+      await refresh();
+    } catch (error) { toast(error.message, true); }
+    finally { input.disabled = false; if (input.isConnected) input.focus(); }
+  };
+  input.focus(); input.select();
+}
+async function deletePath(path) {
+  try {
+    await saveQueue;
+    const deleted = await fileAction('delete', {path});
+    await refresh();
+    const name = path.slice(path.lastIndexOf('/') + 1);
+    toast('Moved ' + name + ' to trash');
+    clearTimeout(toastTimer);
+    const undo = document.createElement('button'); undo.textContent = 'Undo';
+    undo.onclick = async () => {
+      undo.disabled = true;
+      try {
+        await fileAction('restore', {trashed:deleted.trashed, to:deleted.from});
+        await refresh(); toast('Restored ' + name);
+      } catch (error) { toast(error.message, true); }
+    };
+    $('toast').append(undo);
+    toastTimer = setTimeout(() => { $('toast').hidden = true; }, 8000);
+  } catch (error) { toast(error.message, true); }
+}
+function rowActions(row, label, path, folder = false) {
+  const more = document.createElement('button'); more.className = 'more'; more.textContent = '⋯';
+  more.title = 'Actions for ' + path; more.setAttribute('aria-label', more.title); more.setAttribute('aria-haspopup', 'menu');
+  const showMenu = (x, y) => {
+    const menu = $('file-menu'); menu.replaceChildren();
+    for (const [title, action] of [['Rename', () => startRename(path, label, folder)], ['Delete', () => deletePath(path)]]) {
+      const button = document.createElement('button'); button.textContent = title; button.setAttribute('role', 'menuitem');
+      button.onclick = () => { menu.hidden = true; action(); }; menu.append(button);
+    }
+    menu.hidden = false;
+    menu.style.left = Math.max(0, Math.min(x, innerWidth - menu.offsetWidth)) + 'px';
+    menu.style.top = Math.max(0, Math.min(y, innerHeight - menu.offsetHeight)) + 'px';
+    menu.firstChild.focus();
+  };
+  more.onclick = () => { const rect = more.getBoundingClientRect(); showMenu(rect.left, rect.bottom); };
+  row.oncontextmenu = event => { if (event.target.closest('input')) return; event.preventDefault(); showMenu(event.clientX, event.clientY); };
+  row.onkeydown = event => {
+    if (event.target.closest('input')) return;
+    if (event.key === 'F2') { event.preventDefault(); startRename(path, label, folder); }
+    if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deletePath(path); }
+  };
+  row.append(more);
+}
+document.addEventListener('pointerdown', event => { if (!event.target.closest('#file-menu, .more')) $('file-menu').hidden = true; });
+$('file-menu').onkeydown = event => {
+  if (event.key === 'Escape') { $('file-menu').hidden = true; return; }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    const buttons = Array.from($('file-menu').children);
+    buttons[(buttons.indexOf(document.activeElement) + 1) % buttons.length].focus();
+  }
+};
+async function refresh() {
+  const data = await (await request('list')).json();
+  if (!data.folders.some(folder => folder.name === selectedFolder)) selectedFolder = data.folders[0]?.name || '';
+  $('folders').replaceChildren();
+  if (!data.folders.length) {
+    const empty = document.createElement('p');
+    empty.textContent = "Create a folder, then upload a drawing.";
+    $('folders').append(empty);
+  }
+  for (const folder of data.folders) {
+    const heading = document.createElement('button');
+    heading.className = 'folder' + (folder.name === selectedFolder ? ' selected' : '');
+    heading.textContent = folder.name;
+    heading.title = folder.name + " · Select save folder";
+    heading.setAttribute('aria-pressed', String(folder.name === selectedFolder));
+    heading.onclick = () => {
+      selectedFolder = folder.name;
+      document.querySelectorAll('.folder').forEach(button => {
+        const selected = button === heading;
+        button.classList.toggle('selected', selected);
+        button.setAttribute('aria-pressed', String(selected));
+      });
+    };
+    const group = document.createElement('div'); group.className = 'folder-row'; group.dataset.path = folder.name;
+    group.append(heading); rowActions(group, heading, folder.name, true); $('folders').append(group);
+    for (const file of folder.files) {
+      const path = folder.name + '/' + file.name;
+      const row = document.createElement('div');
+      row.className = 'row' + (path === openedPath ? ' opened' : ''); row.dataset.path = path;
+      const button = document.createElement('button'); button.className = 'file'; button.title = file.name;
+      const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = file.kind.toUpperCase();
+      const name = document.createElement('span'); name.className = 'name'; name.textContent = file.name;
+      button.append(tag, name);
+      button.onclick = () => { heading.click(); openPath(path); };
+      const download = document.createElement('a'); download.className = 'download'; download.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 2v8m-3-3 3 3 3-3M3 11v3h10v-3"/></svg>';
+      download.href = apiURL('file', path) + '&download=1'; download.download = file.name;
+      download.title = 'Download ' + file.name; download.setAttribute('aria-label', download.title);
+      row.append(button, download); rowActions(row, button, path); $('folders').append(row);
+    }
+  }
+}
+async function createFolder() {
+  const name = prompt("Folder name");
+  if (!name) return false;
+  await request('folder', name, {method:'POST'});
+  selectedFolder = name;
+  await refresh();
+  return true;
+}
+async function ensureFolder() { return Boolean(selectedFolder) || await createFolder(); }
+function browserDownload(name, bytes) {
+  const url = URL.createObjectURL(new Blob([bytes]));
+  const link = document.createElement('a'); link.href = url; link.download = name;
+  document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+function queueSave(name, bytes, saveAs) {
+  // Capture the destination before asynchronous work or another folder selection.
+  const documentPath = documentPaths.get(activeDocument);
+  if (!saveAs && documentPath) name = documentPath.slice(documentPath.indexOf('/') + 1);
+  let folder = saveAs ? saveAs.folder : documentPath ? documentPath.slice(0, documentPath.indexOf('/')) : nameFolders.get(name) || selectedFolder;
+  pendingSaves++;
+  saveQueue = saveQueue.then(async () => {
+    let path = folder ? folder + '/' + name : name;
+    try {
+      if (!folder) {
+        if (!await ensureFolder()) throw new Error("Select a folder to save.");
+        folder = selectedFolder; path = folder + '/' + name;
+      }
+      await request('file', path, {method:'PUT', body:bytes});
+      nameFolders.set(name, folder);
+      failedSaves.delete(path); failedSaves.delete(name);
+      if (saveAs) {
+        sendOpen({name, bytes, path});
+      }
+      toast("Saved to this box · " + name);
+      try { await refresh(); } catch (error) { toast("Saved · Couldn't refresh drawings · " + error.message, true); }
+    } catch (error) {
+      failedSaves.add(path);
+      toast("Couldn't save " + name + ' · ' + error.message, true);
+    } finally { pendingSaves--; if (saveAs) $('save-as').disabled = false; }
+  });
+}
+async function uploadFiles(files) {
+  try {
+    if (!files.length || !await ensureFolder()) return;
+    const folder = selectedFolder;
+    for (const file of files) {
+      if (!/\.(dxf|dwg)$/i.test(file.name)) { toast("Choose a DWG or DXF file.", true); continue; }
+      toast(file.name + (/\.dwg$/i.test(file.name) ? " · Converting to DXF…" : " · Uploading…"));
+      const result = await (await request('file', folder + '/' + file.name, {method:'PUT', body:file}, true)).json();
+      await refresh();
+      toast('Uploaded to this box · ' + result.saved.slice(result.saved.indexOf('/') + 1));
+      await openPath(result.saved);
+    }
+  } catch (error) { toast("Couldn't upload · " + error.message, true); }
+}
+window.addEventListener('message', async event => {
+  if (event.origin !== location.origin || event.source !== editor.contentWindow) return;
+  const data = event.data;
+  if (!data || typeof data !== 'object') return;
+  if (data.type === 'cadcraft:ready') { ready = true; $('save-as').disabled = false; if (pendingOpen) { sendOpen(pendingOpen); pendingOpen = null; } }
+  if (data.type === 'cadcraft:document' && (typeof data.id === 'string' || data.id === null) && data.id !== activeDocument) {
+    activeDocument = data.id;
+    const path = openingPath;
+    openingPath = null;
+    if (data.id !== null && path && !documentPaths.has(data.id)) {
+      const drawing = await runCad('drawing.inspect');
+      if (data.id === activeDocument && drawing.ok && drawing.value.title === path.slice(path.indexOf('/') + 1)) {
+        documentPaths.set(data.id, path);
+      }
+    }
+    openedPath = documentPaths.get(activeDocument) || '';
+    document.querySelectorAll('.row').forEach(row => row.classList.toggle('opened', row.dataset.path === openedPath));
+  }
+  if (data.type === 'cadcraft:result') {
+    const resolve = cadRequests.get(data.id);
+    if (resolve) { cadRequests.delete(data.id); resolve(data); }
+  }
+  if (data.type === 'cadcraft:dirty') engineDirty = Boolean(data.dirty);
+  if (data.type === 'cadcraft:failed') toast("Drawing editor error · " + String(data.error), true);
+  if (data.type === 'cadcraft:save' && typeof data.name === 'string') {
+    if (/\.dxf$/i.test(data.name)) {
+      const saveAs = nextSaveAs;
+      nextSaveAs = null;
+      queueSave(saveAs ? saveAs.name : data.name, data.bytes, saveAs);
+    }
+    else browserDownload(data.name, data.bytes);
+  }
+});
+window.addEventListener('beforeunload', event => {
+  if (engineDirty || pendingSaves || failedSaves.size) { event.preventDefault(); event.returnValue = ''; }
+});
+$('toggle').onclick = () => {
+  const collapsed = $('drawer').classList.toggle('collapsed');
+  $('toggle').textContent = collapsed ? '›' : '‹';
+  $('toggle').setAttribute('aria-expanded', String(!collapsed));
+  $('toggle').setAttribute('aria-label', collapsed ? "Expand drawings" : "Collapse drawings");
+};
+$('save-as').onclick = async () => {
+  try {
+    if (!await ensureFolder()) return;
+    $('save-name').value = openedPath.slice(openedPath.indexOf('/') + 1) || 'Untitled.dxf';
+    $('save-dialog').showModal();
+    $('save-name').select();
+  } catch (error) { toast("Couldn't save · " + error.message, true); }
+};
+$('save-cancel').onclick = () => $('save-dialog').close();
+$('save-form').onsubmit = event => {
+  event.preventDefault();
+  let name = $('save-name').value.trim();
+  if (!name) return;
+  if (!/\.[^./]+$/.test(name)) name += '.dxf';
+  name = name.replace(/\.dwg$/i, '.dxf');
+  const folder = selectedFolder;
+  const exists = Array.from(document.querySelectorAll('.row')).some(row => row.dataset.path === folder + '/' + name);
+  if (exists && !confirm('Replace ' + name + '?')) return;
+  nextSaveAs = {name, folder};
+  $('save-as').disabled = true;
+  $('save-dialog').close();
+  const win = editor.contentWindow;
+  const canvas = win.document.querySelector('canvas');
+  const mac = /Mac/.test(navigator.platform);
+  canvas.focus();
+  for (const type of ['keydown', 'keyup']) {
+    canvas.dispatchEvent(new win.KeyboardEvent(type, {key:'s', code:'KeyS', ctrlKey:!mac, metaKey:mac, bubbles:true, cancelable:true}));
+  }
+};
+$('new-folder').onclick = () => createFolder().catch(error => toast("Couldn't create folder · " + error.message, true));
+$('upload').onclick = () => $('files').click();
+$('files').onchange = () => { uploadFiles(Array.from($('files').files)); $('files').value = ''; };
+let dragDepth = 0;
+$('drawer').addEventListener('dragenter', event => { event.preventDefault(); dragDepth++; $('drawer').classList.add('hot'); });
+$('drawer').addEventListener('dragover', event => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; });
+$('drawer').addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('drawer').classList.remove('hot'); } });
+$('drawer').addEventListener('drop', event => {
+  event.preventDefault(); dragDepth = 0; $('drawer').classList.remove('hot');
+  uploadFiles(Array.from(event.dataTransfer.files));
+});
+const cadRequests = new Map();
+let cadSequence = 0;
+function cancelCadRequests(message) {
+  for (const [id, resolve] of cadRequests) resolve({id, ok:false, error:message});
+  cadRequests.clear();
+}
+function runCad(method, params = {}) {
+  if (!ready || !editor.contentWindow) return Promise.resolve({ok:false, error:'Drawing editor is not open.'});
+  const id = 'cad-' + (++cadSequence);
+  return new Promise(resolve => {
+    cadRequests.set(id, resolve);
+    try { editor.contentWindow.postMessage({type:'cadcraft:run', id, method, params}, location.origin); }
+    catch (error) { cadRequests.delete(id); resolve({id, ok:false, error:error.message}); }
+  });
+}
+editor.addEventListener('load', () => {
+  ready = false;
+  documentPaths.clear();
+  openingPath = activeDocument = null;
+  openedPath = '';
+  cancelCadRequests('Drawing editor reloaded.');
+});
+window.addEventListener('offline', () => cancelCadRequests('Browser disconnected.'));
+
+refresh().catch(error => toast("Couldn't load drawings · " + error.message, true));
+// Install the message listener before the embedded application can announce ready.
+editor.src = '/cad/app/index.html?host=parent';
+</script>
+<script defer src="/assets/porthole.js"></script>
+</body>
+</html>

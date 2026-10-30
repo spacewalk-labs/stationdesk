@@ -1,0 +1,17 @@
+[Unit]
+Description=StationDesk Paseo browser host
+After=stationdesk-paseo.service
+Wants=stationdesk-paseo.service
+[Service]
+Type=simple
+Environment=HOME=%h
+Environment=PASEO_HOST_KIND=server
+Environment=PASEO_HOST_CLIENT_ID=stationdesk-paseo-browse-host
+Environment=PASEO_BROWSE_MAX_TABS=24
+Environment=PASEO_BROWSE_STREAM_PORT=19955
+ExecStart=/bin/bash -c 'export PATH="$$STATIONDESK_ROOT/runtime/node/bin:$$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"; export PASEO_WS_URL="ws://127.0.0.1:$$STATIONDESK_PORT/ws"; export PASEO_BROWSE_ALLOWED_ORIGIN="https://$$STATIONDESK_FQDN:19950"; cd "$$STATIONDESK_ROOT/runtime/paseo-browse-host"; exec "$$STATIONDESK_ROOT/runtime/node/bin/node" bin/paseo-browse-host.js'
+Restart=always
+RestartSec=3
+MemoryMax=2G
+[Install]
+WantedBy=default.target

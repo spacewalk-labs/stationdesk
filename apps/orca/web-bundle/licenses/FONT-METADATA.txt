@@ -1,0 +1,34 @@
+Geist-Variable-CrgPqtmy.woff2
+SHA256 e24cec106619c03f0b3519e31b9bc55e0d5e926b6a95b8d798cd8cef215b1505
+0: Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font.git)
+1: Geist
+5: Version 1.800
+13: This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: https://openfontlicense.org
+14: https://openfontlicense.org
+
+SymbolsNerdFontMono-Regular-CoUzE12l.woff2
+SHA256 8efa6ba89f0a1f3eefde028f36aa64a13e36282e15ea0ca6929c664501037467
+0: Copyright (c) 2016, Ryan McIntyre
+1: Symbols Nerd Font Mono
+5: Version 001.000;Nerd Fonts 3.4.0
+
+KaTeX_Main-Regular-ypZvNtVU.ttf
+SHA256 d0332f52868370fd83ae7fa46470f90c8f2eab2fcf12bc4f88080b340c95a830
+0: Copyright (c) 2009-2010 Design Science, Inc.
+Copyright (c) 2014-2018 Khan Academy
+1: KaTeX_Main
+5: Version 1.1; ttfautohint (v1.8.3)
+13: Copyright (c) 2009-2010, Design Science, Inc. (<www.mathjax.org>)
+Copyright (c) 2014-2018 Khan Academy (<www.khanacademy.org>),
+with Reserved Font Name KaTeX_Main.
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license available with a FAQ at:
+http://scripts.sil.org/OFL
+14: http://scripts.sil.org/OFL
+
+codicon-ngg6Pgfi.ttf
+SHA256 9d25513c861704be650eacef8c4588aceabdc8b668857747b5e42b299e926918
+1: codicon
+5: Version 1.15
+

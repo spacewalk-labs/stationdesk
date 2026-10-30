@@ -1,0 +1,6 @@
+label = "CAD"
+description = "Drawing editor"
+description_ko = "도면 편집"
+icon = "cad.svg"
+port = 19960
+files = ["runtime/cad", "web/cad"]

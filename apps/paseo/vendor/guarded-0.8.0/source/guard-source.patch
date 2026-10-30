@@ -1,0 +1,1470 @@
+--- a/packages/client/src/daemon-client.ts
++++ b/packages/client/src/daemon-client.ts
+@@ -1,3 +1,5 @@
++// StationDesk modification: guard-port source restored from shipped JavaScript.
++// Local modifications: AGPL-3.0-only; upstream Paseo: Apache-2.0.
+ import { ProviderSnapshotUpdates } from "./provider-snapshots/index.js";
+ import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+ import {
+@@ -22,6 +24,7 @@
+   DaemonUpdateResponseSchema,
+   SessionInboundMessageSchema,
+   type ActiveTurnBehavior,
++  type AgentMessageSendGuard,
+   type ServerInfoStatusPayload,
+ } from "@getpaseo/protocol/messages";
+ import { validateWSOutboundMessage } from "@getpaseo/protocol/validation/ws-outbound";
+@@ -353,9 +356,21 @@
+ 
+ export interface SendMessageOptions {
+   messageId?: string;
++  /** Optional atomic precondition; see `AgentMessageSendGuard`. */
++  guard?: AgentMessageSendGuard;
+   activeTurnBehavior?: ActiveTurnBehavior;
+   images?: Array<{ data: string; mimeType: string }>;
+   attachments?: SendAgentMessageRequest["attachments"];
++}
++
++export interface GuardedSendAgentMessageResult {
++  agentId: string;
++  accepted: boolean;
++  guard: {
++    matched: boolean;
++    reason: "agent_id_mismatch" | "updated_at_mismatch" | "not_idle" | "archived" | null;
++  };
++  error: string | null;
+ }
+ 
+ export interface AgentAttentionRequiredNotification {
+@@ -542,6 +557,12 @@
+   SessionOutboundMessage,
+   { type: "schedule/resume/response" }
+ >["payload"];
++type ScheduleStateTransitionPayload = Extract<SessionOutboundMessage, {
++  type: "schedule.state.transition.response";
++}>["payload"];
++type ScheduleStateRestorePayload = Extract<SessionOutboundMessage, {
++  type: "schedule.state.restore.response";
++}>["payload"];
+ type ScheduleDeletePayload = Extract<
+   SessionOutboundMessage,
+   { type: "schedule/delete/response" }
+@@ -765,6 +786,13 @@
+   id: string;
+   requestId?: string;
+ }
++export interface TransitionScheduleStateOptions extends InspectScheduleOptions {
++  operationId: string;
++  targetStatus: "active" | "paused";
++}
++export interface RestoreScheduleStateOptions extends InspectScheduleOptions {
++  operationId: string;
++}
+ export interface UpdateScheduleNewAgentConfig {
+   provider?: string;
+   model?: string | null;
+@@ -3186,11 +3214,14 @@
+   // Agent Interaction
+   // ============================================================================
+ 
+-  async sendAgentMessage(
+-    agentId: string,
+-    text: string,
+-    options?: SendMessageOptions,
+-  ): Promise<void> {
++  async sendAgentMessage(agentId: string, text: string, options: SendMessageOptions & {
++    guard: AgentMessageSendGuard;
++  }): Promise<GuardedSendAgentMessageResult>;
++  async sendAgentMessage(agentId: string, text: string, options?: SendMessageOptions): Promise<void>;
++  async sendAgentMessage(agentId: string, text: string, options?: SendMessageOptions): Promise<void | GuardedSendAgentMessageResult> {
++    if (options?.guard) {
++      this.requireAgentMessageSendGuard();
++    }
+     const requestId = this.createRequestId();
+     const messageId = options?.messageId ?? crypto.randomUUID();
+     const message = SessionInboundMessageSchema.parse({
+@@ -3199,6 +3230,7 @@
+       agentId,
+       text,
+       ...(messageId ? { messageId } : {}),
++      ...(options?.guard ? { guard: options.guard } : {}),
+       ...(options?.activeTurnBehavior ? { activeTurnBehavior: options.activeTurnBehavior } : {}),
+       ...(options?.images ? { images: options.images } : {}),
+       ...(options?.attachments ? { attachments: options.attachments } : {}),
+@@ -3217,12 +3249,48 @@
+         return msg.payload;
+       },
+     });
+-    if (!payload.accepted) {
+-      throw new Error(payload.error ?? "sendAgentMessage rejected");
+-    }
+-  }
+-
+-  async sendMessage(agentId: string, text: string, options?: SendMessageOptions): Promise<void> {
++    return this.parseSendAgentMessagePayload(payload, options?.guard !== undefined);
++  }
++  private parseSendAgentMessagePayload(
++    payload: Extract<SessionOutboundMessage, { type: "send_agent_message_response" }>["payload"],
++    guarded: boolean,
++  ): void | GuardedSendAgentMessageResult {
++    if (!guarded) {
++      if (!payload.accepted) {
++        throw new Error(payload.error ?? "sendAgentMessage rejected");
++      }
++      return;
++    }
++    if (!payload.accepted && !payload.guard) {
++      // Rejected for a reason unrelated to the guard itself (e.g. a
++      // messageId/request conflict in the daemon's request journal) — surface
++      // that error rather than claiming the guard result is missing.
++      throw new Error(payload.error ?? "guarded sendAgentMessage rejected");
++    }
++    if (!payload.guard) {
++      throw new Error("Guarded agent message response is missing guard result");
++    }
++    return {
++      agentId: payload.agentId,
++      accepted: payload.accepted,
++      guard: payload.guard,
++      error: payload.error,
++    };
++  }
++  private requireAgentMessageSendGuard(): void {
++    // COMPAT(agentMessageSendGuard): added in v0.8.0; remove gate after 2027-03-05.
++    if (this.lastServerInfoMessage?.features?.agentMessageSendGuard !== true) {
++      throw new Error("This host does not support guarded agent messages; update Paseo");
++    }
++  }
++  async sendMessage(agentId: string, text: string, options: SendMessageOptions & {
++    guard: AgentMessageSendGuard;
++  }): Promise<GuardedSendAgentMessageResult>;
++  async sendMessage(agentId: string, text: string, options?: SendMessageOptions): Promise<void>;
++  async sendMessage(agentId: string, text: string, options?: SendMessageOptions): Promise<void | GuardedSendAgentMessageResult> {
++    if (options?.guard) {
++      return this.sendAgentMessage(agentId, text, { ...options, guard: options.guard });
++    }
+     await this.sendAgentMessage(agentId, text, options);
+   }
+ 
+@@ -5669,6 +5737,45 @@
+       },
+       responseType: "schedule/resume/response",
+     });
++  }
++
++  /**
++  * Begin (or replay) an exact, ownership-checked pause/resume for a larger
++  * operation that must later undo exactly this transition. Call
++  * `scheduleStateRestore` with the same operationId to undo it. See
++  * docs/schedule-state-restore.md.
++  */
++  async scheduleStateTransition(options: TransitionScheduleStateOptions): Promise<ScheduleStateTransitionPayload> {
++    this.requireScheduleStateRestore();
++    return this.sendCorrelatedSessionRequest({
++      requestId: options.requestId,
++      message: {
++        type: "schedule.state.transition.request",
++        operationId: options.operationId,
++        scheduleId: options.id,
++        targetStatus: options.targetStatus,
++      },
++      responseType: "schedule.state.transition.response",
++    });
++  }
++  /** Undo exactly the transition recorded under `operationId`. */
++  async scheduleStateRestore(options: RestoreScheduleStateOptions): Promise<ScheduleStateRestorePayload> {
++    this.requireScheduleStateRestore();
++    return this.sendCorrelatedSessionRequest({
++      requestId: options.requestId,
++      message: {
++        type: "schedule.state.restore.request",
++        operationId: options.operationId,
++        scheduleId: options.id,
++      },
++      responseType: "schedule.state.restore.response",
++    });
++  }
++  private requireScheduleStateRestore(): void {
++    // COMPAT(scheduleStateRestore): added in v0.8.0; remove gate after 2027-03-05.
++    if (this.lastServerInfoMessage?.features?.scheduleStateRestore !== true) {
++      throw new Error("This host does not support exact schedule state restoration; update Paseo");
++    }
+   }
+ 
+   async scheduleDelete(options: InspectScheduleOptions): Promise<ScheduleDeletePayload> {
+--- a/packages/protocol/src/messages.ts
++++ b/packages/protocol/src/messages.ts
+@@ -1,3 +1,5 @@
++// StationDesk modification: guard-port source restored from shipped JavaScript.
++// Local modifications: AGPL-3.0-only; upstream Paseo: Apache-2.0.
+ import { z } from "zod";
+ import { TerminalActivitySchema } from "./terminal-activity.js";
+ import { CLIENT_CAPS } from "./client-capabilities.js";
+@@ -30,6 +32,8 @@
+   ScheduleLogsRequestSchema,
+   SchedulePauseRequestSchema,
+   ScheduleResumeRequestSchema,
++  ScheduleStateTransitionRequestSchema,
++  ScheduleStateRestoreRequestSchema,
+   ScheduleDeleteRequestSchema,
+   ScheduleRunOnceRequestSchema,
+   ScheduleUpdateRequestSchema,
+@@ -39,6 +43,8 @@
+   ScheduleLogsResponseSchema,
+   SchedulePauseResponseSchema,
+   ScheduleResumeResponseSchema,
++  ScheduleStateTransitionResponseSchema,
++  ScheduleStateRestoreResponseSchema,
+   ScheduleDeleteResponseSchema,
+   ScheduleRunOnceResponseSchema,
+   ScheduleUpdateResponseSchema,
+@@ -1392,6 +1398,18 @@
+   agentId: z.string(),
+ });
+ 
++// Optional atomic precondition on send_agent_message_request: the daemon checks
++// these facts inside the agent's lifecycle mutation lane immediately before
++// dispatch, and rejects without unarchiving or replacing a running turn on any
++// mismatch. The timestamp is daemon-owned; external claims are not authority.
++export const AgentMessageSendGuardSchema = z.object({
++  expectedAgentId: z.string(),
++  expectedUpdatedAt: z.string(),
++  expectedStatus: z.literal("idle"),
++  expectedArchivedAt: z.null(),
++});
++export type AgentMessageSendGuard = z.infer<typeof AgentMessageSendGuardSchema>;
++
+ export const SendAgentMessageRequestSchema = z.object({
+   type: z.literal("send_agent_message_request"),
+   requestId: z.string(),
+@@ -1399,6 +1417,7 @@
+   agentId: z.string(),
+   text: z.string(),
+   messageId: z.string().optional(), // Client-provided ID for deduplication
++  guard: AgentMessageSendGuardSchema.optional(),
+   activeTurnBehavior: ActiveTurnBehaviorSchema.optional(),
+   images: z.array(ImageAttachmentSchema).optional(),
+   attachments: AgentAttachmentsSchema,
+@@ -3255,6 +3274,8 @@
+   ScheduleLogsRequestSchema,
+   SchedulePauseRequestSchema,
+   ScheduleResumeRequestSchema,
++  ScheduleStateTransitionRequestSchema,
++  ScheduleStateRestoreRequestSchema,
+   ScheduleDeleteRequestSchema,
+   ScheduleRunOnceRequestSchema,
+   ScheduleUpdateRequestSchema,
+@@ -3435,6 +3456,10 @@
+         agentRequestReceipts: z.boolean().optional(),
+         // COMPAT(hubAgentRpc): added in v0.8.0; remove gate after 2027-03-05.
+         hubAgentRpc: z.boolean().optional(),
++        // COMPAT(agentMessageSendGuard): added in v0.8.0; remove gate after 2027-03-05.
++        agentMessageSendGuard: z.boolean().optional(),
++        // COMPAT(scheduleStateRestore): added in v0.8.0; remove gate after 2027-03-05.
++        scheduleStateRestore: z.boolean().optional(),
+         providersSnapshot: z.boolean().optional(),
+         // COMPAT(providersSnapshotCwd): added in v0.3.2, remove gate after 2027-02-10.
+         providersSnapshotCwd: z.boolean().optional(),
+@@ -4704,6 +4729,15 @@
+     agentId: z.string(),
+     accepted: z.boolean(),
+     error: z.string().nullable(),
++    // Present only when the request carried a guard.
++    guard: z
++      .object({
++      matched: z.boolean(),
++      reason: z
++        .enum(["agent_id_mismatch", "updated_at_mismatch", "not_idle", "archived"])
++        .nullable(),
++    })
++      .optional(),
+   }),
+ });
+ 
+@@ -6661,6 +6695,8 @@
+   ScheduleLogsResponseSchema,
+   SchedulePauseResponseSchema,
+   ScheduleResumeResponseSchema,
++  ScheduleStateTransitionResponseSchema,
++  ScheduleStateRestoreResponseSchema,
+   ScheduleDeleteResponseSchema,
+   ScheduleRunOnceResponseSchema,
+   ScheduleUpdateResponseSchema,
+@@ -6837,6 +6873,8 @@
+ export type ScheduleLogsResponse = z.infer<typeof ScheduleLogsResponseSchema>;
+ export type SchedulePauseResponse = z.infer<typeof SchedulePauseResponseSchema>;
+ export type ScheduleResumeResponse = z.infer<typeof ScheduleResumeResponseSchema>;
++export type ScheduleStateTransitionResponse = z.infer<typeof ScheduleStateTransitionResponseSchema>;
++export type ScheduleStateRestoreResponse = z.infer<typeof ScheduleStateRestoreResponseSchema>;
+ export type ScheduleDeleteResponse = z.infer<typeof ScheduleDeleteResponseSchema>;
+ export type ScheduleRunOnceResponse = z.infer<typeof ScheduleRunOnceResponseSchema>;
+ export type ScheduleUpdateResponse = z.infer<typeof ScheduleUpdateResponseSchema>;
+@@ -6905,6 +6943,8 @@
+ export type ScheduleLogsRequest = z.infer<typeof ScheduleLogsRequestSchema>;
+ export type SchedulePauseRequest = z.infer<typeof SchedulePauseRequestSchema>;
+ export type ScheduleResumeRequest = z.infer<typeof ScheduleResumeRequestSchema>;
++export type ScheduleStateTransitionRequest = z.infer<typeof ScheduleStateTransitionRequestSchema>;
++export type ScheduleStateRestoreRequest = z.infer<typeof ScheduleStateRestoreRequestSchema>;
+ export type ScheduleDeleteRequest = z.infer<typeof ScheduleDeleteRequestSchema>;
+ export type ScheduleRunOnceRequest = z.infer<typeof ScheduleRunOnceRequestSchema>;
+ export type ScheduleUpdateRequest = z.infer<typeof ScheduleUpdateRequestSchema>;
+--- a/packages/protocol/src/schedule/rpc-schemas.ts
++++ b/packages/protocol/src/schedule/rpc-schemas.ts
+@@ -1,3 +1,5 @@
++// StationDesk modification: guard-port source restored from shipped JavaScript.
++// Local modifications: AGPL-3.0-only; upstream Paseo: Apache-2.0.
+ import { z } from "zod";
+ import {
+   ScheduleCadenceSchema,
+@@ -65,6 +67,24 @@
+   scheduleId: z.string(),
+ });
+ 
++// Exact state restoration: a caller-owned operationId lets a larger operation
++// pause/resume a schedule and later undo exactly that transition (status,
++// pausedAt, nextRunAt) without racing an intervening managed write. See
++// docs/schedule-state-restore.md.
++export const ScheduleStateTransitionRequestSchema = z.object({
++  type: z.literal("schedule.state.transition.request"),
++  requestId: z.string(),
++  operationId: z.string().trim().min(1),
++  scheduleId: z.string(),
++  targetStatus: z.enum(["active", "paused"]),
++});
++export const ScheduleStateRestoreRequestSchema = z.object({
++  type: z.literal("schedule.state.restore.request"),
++  requestId: z.string(),
++  operationId: z.string().trim().min(1),
++  scheduleId: z.string(),
++});
++
+ export const ScheduleDeleteRequestSchema = z.object({
+   type: z.literal("schedule/delete"),
+   requestId: z.string(),
+@@ -153,6 +173,25 @@
+   }),
+ });
+ 
++const ScheduleStateOperationResponsePayloadSchema = z.object({
++  requestId: z.string(),
++  operationId: z.string(),
++  schedule: ScheduleSummarySchema,
++  // True when this response was resolved from an existing receipt rather than
++  // applying a fresh transition/restore.
++  replayed: z.boolean(),
++  // True when the recorded result still matches the schedule's live state.
++  isCurrent: z.boolean(),
++});
++export const ScheduleStateTransitionResponseSchema = z.object({
++  type: z.literal("schedule.state.transition.response"),
++  payload: ScheduleStateOperationResponsePayloadSchema,
++});
++export const ScheduleStateRestoreResponseSchema = z.object({
++  type: z.literal("schedule.state.restore.response"),
++  payload: ScheduleStateOperationResponsePayloadSchema,
++});
++
+ export const ScheduleDeleteResponseSchema = z.object({
+   type: z.literal("schedule/delete/response"),
+   payload: z.object({
+--- a/packages/server/src/server/agent/agent-manager.ts
++++ b/packages/server/src/server/agent/agent-manager.ts
+@@ -1,3 +1,6 @@
++// StationDesk modification, 2026-10-30: guard source reconstructed from the distributed 0.8.0 overlay.
++// Upstream portions: Apache-2.0; StationDesk modifications: AGPL-3.0-only.
++import type { AgentMessageSendGuard } from "@getpaseo/protocol/messages";
+ import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
+ import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
+ import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
+@@ -154,6 +157,17 @@
+   onLateError?: (error: unknown) => void;
+ }
+ 
++export type AgentMessageSendGuardFailureReason = "agent_id_mismatch" | "updated_at_mismatch" | "not_idle" | "archived";
++export class AgentMessageSendGuardRejectedError extends Error {
++  constructor(readonly reason: AgentMessageSendGuardFailureReason) {
++    super(`agent_message_send_guard_rejected:${reason}`);
++    this.name = "AgentMessageSendGuardRejectedError";
++  }
++}
++export function isAgentMessageSendGuardRejectedError(error: unknown): error is AgentMessageSendGuardRejectedError {
++  return error instanceof AgentMessageSendGuardRejectedError;
++}
++
+ function formatProviderList(providers: readonly string[]): string {
+   return providers.length > 0 ? providers.join(", ") : "none";
+ }
+@@ -2235,7 +2249,30 @@
+     return result;
+   }
+ 
+-  async runAgent(
++  async runGuardedAgentMessageSend<T>(agentId: string, guard: AgentMessageSendGuard, send: () => Promise<T>): Promise<T> {
++        return this.runLifecycleMutation(agentId, async () => {
++            if (agentId !== guard.expectedAgentId) {
++                throw new AgentMessageSendGuardRejectedError("agent_id_mismatch");
++            }
++            const record = await this.requireRegistry().get(agentId);
++            if (!record) {
++                throw new AgentMessageSendGuardRejectedError("agent_id_mismatch");
++            }
++            if (record.archivedAt) {
++                throw new AgentMessageSendGuardRejectedError("archived");
++            }
++            const agent = this.agents.get(agentId);
++            if (!agent || agent.lifecycle !== "idle" || this.hasInFlightRun(agentId)) {
++                throw new AgentMessageSendGuardRejectedError("not_idle");
++            }
++            if (agent.updatedAt.toISOString() !== guard.expectedUpdatedAt) {
++                throw new AgentMessageSendGuardRejectedError("updated_at_mismatch");
++            }
++            return send();
++        });
++    }
++
++async runAgent(
+     agentId: string,
+     prompt: AgentPromptInput,
+     options?: AgentRunOptions,
+--- a/packages/server/src/server/agent/agent-prompt.ts
++++ b/packages/server/src/server/agent/agent-prompt.ts
+@@ -1,3 +1,7 @@
++// StationDesk modification, 2026-10-30: guard source reconstructed from the distributed 0.8.0 overlay.
++// Upstream portions: Apache-2.0; StationDesk modifications: AGPL-3.0-only.
++import { AgentMessageSendGuardRejectedError } from "./agent-manager.js";
++import type { AgentMessageSendGuard } from "@getpaseo/protocol/messages";
+ import type { Logger } from "pino";
+ 
+ import type {
+@@ -222,6 +226,7 @@
+ }
+ 
+ export interface SendPromptToAgentParams {
++  guard?: AgentMessageSendGuard;
+   agentManager: AgentManager;
+   agentStorage: AgentStorage;
+   agentId: string;
+@@ -303,36 +308,49 @@
+ export async function sendPromptToAgent(
+   params: SendPromptToAgentParams,
+ ): Promise<{ disposition: PromptDispatchDisposition }> {
+-  const unarchive = params.unarchive ?? true;
+-
+-  const record = await params.agentStorage.get(params.agentId);
+-  if (record?.archivedAt) {
+-    if (!unarchive) {
+-      return { disposition: "turn_started" };
+-    }
+-    await unarchiveAgentState(params.agentStorage, params.agentManager, params.agentId);
+-  }
+-
+-  await ensureAgentLoaded(params.agentId, {
+-    agentManager: params.agentManager,
+-    agentStorage: params.agentStorage,
+-    logger: params.logger,
+-  });
+-
+-  if (params.sessionMode) {
+-    await params.agentManager.setAgentMode(params.agentId, params.sessionMode);
+-  }
+-
+-  const runOptions = params.messageId
+-    ? { ...params.runOptions, clientMessageId: params.messageId }
+-    : params.runOptions;
+-
+-  return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
+-    replaceRunning: true,
+-    activeTurnBehavior: params.activeTurnBehavior,
+-    clearPendingPermissions: params.clearPendingPermissions,
+-    runOptions,
+-  });
++    const unarchive = params.unarchive ?? true;
++    const record = await params.agentStorage.get(params.agentId);
++    if (record?.archivedAt) {
++        if (params.guard) {
++            throw new AgentMessageSendGuardRejectedError("archived");
++        }
++        if (!unarchive) {
++            return { disposition: "turn_started" };
++        }
++        await unarchiveAgentState(params.agentStorage, params.agentManager, params.agentId);
++    }
++    await ensureAgentLoaded(params.agentId, {
++        agentManager: params.agentManager,
++        agentStorage: params.agentStorage,
++        logger: params.logger,
++    });
++    if (params.guard && params.sessionMode) {
++        throw new Error("A guarded send cannot change session mode");
++    }
++    if (params.sessionMode) {
++        await params.agentManager.setAgentMode(params.agentId, params.sessionMode);
++    }
++    const runOptions = params.messageId
++        ? { ...params.runOptions, clientMessageId: params.messageId }
++        : params.runOptions;
++    if (params.guard) {
++        // Check-and-dispatch happen atomically inside the same lifecycle
++        // mutation lane as archive/metadata/detach, immediately before start, so
++        // nothing can unarchive, archive, or relabel this agent in between. A
++        // guarded send never replaces a running turn.
++        return params.agentManager.runGuardedAgentMessageSend(params.agentId, params.guard, () => startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
++            replaceRunning: false,
++            activeTurnBehavior: params.activeTurnBehavior,
++            clearPendingPermissions: params.clearPendingPermissions,
++            runOptions,
++        }));
++    }
++    return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
++        replaceRunning: true,
++        activeTurnBehavior: params.activeTurnBehavior,
++        clearPendingPermissions: params.clearPendingPermissions,
++        runOptions,
++    });
+ }
+ 
+ export async function startCreatedAgentInitialPrompt(
+--- a/packages/server/src/server/authorization/operation-permissions.ts
++++ b/packages/server/src/server/authorization/operation-permissions.ts
+@@ -1,3 +1,5 @@
++// StationDesk modification, 2026-10-30: guard source reconstructed from the distributed 0.8.0 overlay.
++// Upstream portions: Apache-2.0; StationDesk modifications: AGPL-3.0-only.
+ import type { SessionInboundMessage, SessionOutboundMessage } from "../messages.js";
+ import type { DaemonPermission } from "./index.js";
+ 
+@@ -160,6 +162,8 @@
+   "schedule/resume": "automation.manage",
+   "schedule/run-once": "automation.manage",
+   "schedule/update": "automation.manage",
++  "schedule.state.transition.request": "automation.manage",
++  "schedule.state.restore.request": "automation.manage",
+   send_agent_message_request: ["workspace.write", "hub.execute"],
+   set_agent_feature_request: "workspace.write",
+   set_agent_mode_request: "workspace.write",
+@@ -372,6 +376,8 @@
+   "schedule/resume/response": "automation.manage",
+   "schedule/run-once/response": "automation.manage",
+   "schedule/update/response": "automation.manage",
++  "schedule.state.transition.response": "automation.manage",
++  "schedule.state.restore.response": "automation.manage",
+   script_status_update: "workspace.read",
+   send_agent_message_response: ["workspace.write", "hub.execute"],
+   set_agent_feature_response: "workspace.write",
+--- a/packages/server/src/server/schedule/service.ts
++++ b/packages/server/src/server/schedule/service.ts
+@@ -1,3 +1,5 @@
++// StationDesk modification, 2026-10-30: guard source reconstructed from the distributed 0.8.0 overlay.
++// Upstream portions: Apache-2.0; StationDesk modifications: AGPL-3.0-only.
+ import { randomUUID } from "node:crypto";
+ import { stat } from "node:fs/promises";
+ import { join } from "node:path";
+@@ -16,6 +18,7 @@
+ import { type BoundCreateAgentCommand, formatProviderModel } from "../agent/create-agent/create.js";
+ import type { PersistedWorkspaceRecord } from "../workspace-registry.js";
+ import type { CreatePaseoWorktreeWorkflowResult } from "../worktree-session.js";
++import type { ScheduleStateOperationResult } from "./store.js";
+ import { ScheduleStore } from "./store.js";
+ import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
+ import type {
+@@ -434,7 +437,50 @@
+     return requireSchedule(resumed, id);
+   }
+ 
+-  async update(input: UpdateScheduleInput): Promise<StoredSchedule> {
++  async transitionState(input: {
++        operationId: string;
++        scheduleId: string;
++        targetStatus: "active" | "paused";
++    }): Promise<ScheduleStateOperationResult> {
++        return this.store.transitionState(input, (schedule) => {
++            if (schedule.status === "completed") {
++                throw new Error(`Schedule ${input.scheduleId} is already completed`);
++            }
++            if (schedule.status === input.targetStatus) {
++                return schedule;
++            }
++            const now = this.now();
++            if (input.targetStatus === "paused") {
++                return {
++                    ...schedule,
++                    status: "paused",
++                    nextRunAt: null,
++                    pausedAt: now.toISOString(),
++                    updatedAt: now.toISOString(),
++                };
++            }
++            return {
++                ...schedule,
++                status: "active",
++                pausedAt: null,
++                nextRunAt: computeNextRunAt(schedule.cadence, now).toISOString(),
++                updatedAt: now.toISOString(),
++            };
++        });
++    }
++
++async restoreState(input: {
++        operationId: string;
++        scheduleId: string;
++    }): Promise<ScheduleStateOperationResult> {
++        return this.store.restoreState(input, (schedule, state) => ({
++            ...schedule,
++            ...state,
++            updatedAt: this.now().toISOString(),
++        }));
++    }
++
++async update(input: UpdateScheduleInput): Promise<StoredSchedule> {
+     const next = await this.store.update(input.id, async (schedule) => {
+       const now = this.now();
+       let updated: StoredSchedule = schedule;
+--- a/packages/server/src/server/schedule/store.ts
++++ b/packages/server/src/server/schedule/store.ts
+@@ -1,7 +1,11 @@
+-import { randomBytes } from "node:crypto";
++// StationDesk modification, 2026-10-30: guard source reconstructed from the distributed 0.8.0 overlay.
++// Upstream portions: Apache-2.0; StationDesk modifications: AGPL-3.0-only.
++import { z } from "zod";
++import { createHash, randomBytes, randomUUID } from "node:crypto";
+ import { mkdir, readFile, readdir, rm } from "node:fs/promises";
+ import { join } from "node:path";
+ import {
++  ScheduleStatusSchema,
+   StoredScheduleSchema,
+   type ScheduleTarget,
+   type StoredSchedule,
+@@ -17,6 +21,50 @@
+ interface ScheduleNameTargetUpsert {
+   create: () => Omit<StoredSchedule, "id"> | Promise<Omit<StoredSchedule, "id">>;
+   update: ScheduleUpdater;
++}
++
++// Every on-disk schedule carries a mutation version so an exact state
++// operation (see transitionState/restoreState below) can tell whether the
++// schedule it is about to restore is still the exact one it changed, or
++// whether some other managed write landed in between (including one that
++// happened to return the visible fields to their previous values).
++const ScheduleMutationVersionSchema = z.object({
++    generation: z.string(),
++    sequence: z.number().int().nonnegative(),
++});
++const PersistedScheduleSchema = StoredScheduleSchema.extend({
++    _mutationVersion: ScheduleMutationVersionSchema,
++});
++const ScheduleStateSchema = z.object({
++    status: ScheduleStatusSchema,
++    pausedAt: z.string().nullable(),
++    nextRunAt: z.string().nullable(),
++});
++const ScheduleStateReceiptSchema = z.object({
++    version: ScheduleMutationVersionSchema,
++    state: ScheduleStateSchema,
++    schedule: StoredScheduleSchema,
++});
++const ScheduleStateOperationSchema = z.object({
++    operationId: z.string(),
++    scheduleId: z.string(),
++    targetStatus: z.enum(["active", "paused"]),
++    phase: z.enum(["prepared", "applied", "restore-prepared", "restored"]),
++    before: ScheduleStateReceiptSchema,
++    after: ScheduleStateReceiptSchema,
++    restored: ScheduleStateReceiptSchema.optional(),
++});
++type ScheduleMutationVersion = z.infer<typeof ScheduleMutationVersionSchema>;
++type PersistedSchedule = z.infer<typeof PersistedScheduleSchema>;
++export type ScheduleState = z.infer<typeof ScheduleStateSchema>;
++type ScheduleStateReceipt = z.infer<typeof ScheduleStateReceiptSchema>;
++type ScheduleStateOperation = z.infer<typeof ScheduleStateOperationSchema>;
++export interface ScheduleStateOperationResult { schedule: StoredSchedule; replayed: boolean; isCurrent: boolean; }
++export interface ScheduleStoreTestHooks {
++ afterOperationPrepared?: () => void | Promise<void>;
++ afterScheduleWritten?: () => void | Promise<void>;
++ afterRestorePrepared?: () => void | Promise<void>;
++ afterRestoreScheduleWritten?: () => void | Promise<void>;
+ }
+ 
+ function canonicalize(value: unknown): unknown {
+@@ -91,7 +139,7 @@
+   private readonly scheduleMutations = new Map<string, Promise<unknown>>();
+   private readonly identityMutations = new Map<string, Promise<unknown>>();
+ 
+-  constructor(private readonly dir: string) {}
++  constructor(private readonly dir: string, private readonly testHooks: ScheduleStoreTestHooks = {}) {}
+ 
+   private filePath(id: string): string {
+     return join(this.dir, `${id}.json`);
+@@ -102,92 +150,90 @@
+   }
+ 
+   async list(): Promise<StoredSchedule[]> {
+-    await this.ensureDir();
+-    const entries = await readdir(this.dir, { withFileTypes: true });
+-    const schedules = await Promise.all(
+-      entries
+-        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+-        .map(async (entry) => {
+-          const content = await readFile(join(this.dir, entry.name), "utf-8");
+-          return StoredScheduleSchema.parse(JSON.parse(content));
+-        }),
+-    );
+-    return schedules.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+-  }
++        await this.ensureDir();
++        const entries = await readdir(this.dir, { withFileTypes: true });
++        const schedules = await Promise.all(entries
++            .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
++            .map(async (entry) => {
++            const id = entry.name.slice(0, -".json".length);
++            const persisted = await this.getPersisted(id);
++            if (!persisted) {
++                throw new Error(`Schedule disappeared while listing: ${id}`);
++            }
++            return this.toStoredSchedule(persisted);
++        }));
++        return schedules.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
++    }
+ 
+   async get(id: string): Promise<StoredSchedule | null> {
+-    await this.ensureDir();
+-    try {
+-      const content = await readFile(this.filePath(id), "utf-8");
+-      return StoredScheduleSchema.parse(JSON.parse(content));
+-    } catch (error) {
+-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+-        return null;
+-      }
+-      throw error;
+-    }
+-  }
++        const persisted = await this.getPersisted(id);
++        return persisted ? this.toStoredSchedule(persisted) : null;
++    }
+ 
+   async create(schedule: Omit<StoredSchedule, "id">): Promise<StoredSchedule> {
+-    const created = StoredScheduleSchema.parse({ ...schedule, id: generateScheduleId() });
+-    await this.write(created);
+-    return created;
+-  }
++        const created = StoredScheduleSchema.parse({ ...schedule, id: generateScheduleId() });
++        await this.writePersisted({
++            ...created,
++            _mutationVersion: { generation: randomUUID(), sequence: 0 },
++        });
++        return created;
++    }
+ 
+   async update(id: string, updater: ScheduleUpdater): Promise<StoredSchedule | null> {
+-    return this.serializeScheduleMutation(id, async () => {
+-      const current = await this.get(id);
+-      if (!current) {
+-        return null;
+-      }
+-      const next = await updater(current);
+-      if (next === current) {
+-        return current;
+-      }
+-      if (next.id !== id) {
+-        throw new Error(`Schedule update cannot change id: ${id}`);
+-      }
+-      const updated = StoredScheduleSchema.parse(next);
+-      await this.write(updated);
+-      return updated;
+-    });
+-  }
++        return this.serializeScheduleMutation(id, async () => {
++            const persisted = await this.getPersisted(id);
++            if (!persisted) {
++                return null;
++            }
++            const current = this.toStoredSchedule(persisted);
++            const next = await updater(current);
++            if (next === current) {
++                return current;
++            }
++            if (next.id !== id) {
++                throw new Error(`Schedule update cannot change id: ${id}`);
++            }
++            const updated = StoredScheduleSchema.parse(next);
++            await this.writePersisted({
++                ...updated,
++                _mutationVersion: this.nextMutationVersion(persisted._mutationVersion),
++            });
++            return updated;
++        });
++    }
+ 
+   async upsertByNameAndTarget(
+     name: string,
+     target: ScheduleTarget,
+     options: ScheduleNameTargetUpsert,
+   ): Promise<StoredSchedule> {
+-    const identity = nameTargetIdentityKey(name, target);
+-    return this.serializeIdentityMutation(identity, async () => {
+-      while (true) {
+-        const existing = (await this.list()).find((schedule) =>
+-          matchesNameAndTarget(schedule, name, target),
+-        );
+-        if (!existing) {
+-          const created = StoredScheduleSchema.parse({
+-            ...(await options.create()),
+-            id: generateScheduleId(),
+-          });
+-          if (!matchesNameAndTarget(created, name, target)) {
+-            throw new Error("Created schedule does not match requested identity");
+-          }
+-          await this.write(created);
+-          return created;
+-        }
+-
+-        const updated = await this.updateMatchedSchedule(existing.id, name, target, options.update);
+-        if (updated) {
+-          return updated;
+-        }
+-      }
+-    });
+-  }
+-
+-  private async write(schedule: StoredSchedule): Promise<void> {
+-    await this.ensureDir();
+-    await writeJsonFileAtomic(this.filePath(schedule.id), schedule);
+-  }
++        const identity = nameTargetIdentityKey(name, target);
++        return this.serializeIdentityMutation(identity, async () => {
++            while (true) {
++                const existing = (await this.list()).find((schedule) => matchesNameAndTarget(schedule, name, target));
++                if (!existing) {
++                    const created = StoredScheduleSchema.parse({
++                        ...(await options.create()),
++                        id: generateScheduleId(),
++                    });
++                    if (!matchesNameAndTarget(created, name, target)) {
++                        throw new Error("Created schedule does not match requested identity");
++                    }
++                    await this.writePersisted({
++                        ...created,
++                        _mutationVersion: { generation: randomUUID(), sequence: 0 },
++                    });
++                    return created;
++                }
++                const updated = await this.updateMatchedSchedule(existing.id, name, target, options.update);
++                if (updated) {
++                    return updated;
++                }
++            }
++        });
++    }
++
++
+ 
+   async delete(id: string): Promise<void> {
+     await this.serializeScheduleMutation(id, async () => {
+@@ -233,21 +279,282 @@
+     target: ScheduleTarget,
+     updater: ScheduleUpdater,
+   ): Promise<StoredSchedule | null> {
+-    return this.serializeScheduleMutation(id, async () => {
+-      const current = await this.get(id);
+-      if (!current || !matchesNameAndTarget(current, name, target)) {
+-        return null;
+-      }
+-      const next = await updater(current);
+-      if (next.id !== id) {
+-        throw new Error(`Schedule update cannot change id: ${id}`);
+-      }
+-      const updated = StoredScheduleSchema.parse(next);
+-      if (!matchesNameAndTarget(updated, name, target)) {
+-        throw new Error("Updated schedule does not match requested identity");
+-      }
+-      await this.write(updated);
+-      return updated;
+-    });
+-  }
+-}
++        return this.serializeScheduleMutation(id, async () => {
++            const persisted = await this.getPersisted(id);
++            if (!persisted) {
++                return null;
++            }
++            const current = this.toStoredSchedule(persisted);
++            if (!matchesNameAndTarget(current, name, target)) {
++                return null;
++            }
++            const next = await updater(current);
++            if (next.id !== id) {
++                throw new Error(`Schedule update cannot change id: ${id}`);
++            }
++            const updated = StoredScheduleSchema.parse(next);
++            if (!matchesNameAndTarget(updated, name, target)) {
++                throw new Error("Updated schedule does not match requested identity");
++            }
++            await this.writePersisted({
++                ...updated,
++                _mutationVersion: this.nextMutationVersion(persisted._mutationVersion),
++            });
++            return updated;
++        });
++    }
++private operationFilePath(operationId: string): string {
++        const digest = createHash("sha256").update(operationId).digest("hex");
++        return join(this.dir, "operations", `${digest}.json`);
++    }
++
++private async getPersisted(id: string): Promise<PersistedSchedule | null> {
++        await this.ensureDir();
++        try {
++            const content = await readFile(this.filePath(id), "utf-8");
++            const parsed = JSON.parse(content);
++            if (parsed._mutationVersion === undefined) {
++                return PersistedScheduleSchema.parse({
++                    ...parsed,
++                    _mutationVersion: {
++                        generation: createHash("sha256")
++                            .update(JSON.stringify(canonicalize(parsed)))
++                            .digest("hex"),
++                        sequence: 0,
++                    },
++                });
++            }
++            return PersistedScheduleSchema.parse(parsed);
++        }
++        catch (error) {
++            if ((error as NodeJS.ErrnoException).code === "ENOENT") {
++                return null;
++            }
++            throw error;
++        }
++    }
++
++private async writePersisted(schedule: PersistedSchedule): Promise<void> {
++        await this.ensureDir();
++        await writeJsonFileAtomic(this.filePath(schedule.id), schedule);
++    }
++
++private toStoredSchedule(schedule: PersistedSchedule): StoredSchedule {
++        return StoredScheduleSchema.parse(schedule);
++    }
++
++private nextMutationVersion(version: ScheduleMutationVersion): ScheduleMutationVersion {
++        return { ...version, sequence: version.sequence + 1 };
++    }
++
++private async reconcileTransition(operation: ScheduleStateOperation): Promise<ScheduleStateOperation> {
++        if (operation.phase !== "prepared") {
++            return operation;
++        }
++        const current = await this.getPersisted(operation.scheduleId);
++        if (current && this.matchesReceipt(current, operation.after)) {
++            const applied: ScheduleStateOperation = { ...operation, phase: "applied" };
++            await this.writeOperation(applied);
++            return applied;
++        }
++        if (current && this.matchesReceipt(current, operation.before)) {
++            const afterPersisted = PersistedScheduleSchema.parse({
++                ...operation.after.schedule,
++                _mutationVersion: operation.after.version,
++            });
++            await this.writePersisted(afterPersisted);
++            const applied: ScheduleStateOperation = { ...operation, phase: "applied" };
++            await this.writeOperation(applied);
++            return applied;
++        }
++        throw new Error(`Schedule ${operation.scheduleId} no longer matches prepared operation ${operation.operationId}`);
++    }
++
++private async reconcileRestore(operation: ScheduleStateOperation): Promise<ScheduleStateOperation> {
++        const restored = operation.restored;
++        if (operation.phase !== "restore-prepared" || !restored) {
++            return operation;
++        }
++        const current = await this.getPersisted(operation.scheduleId);
++        if (current && this.matchesReceipt(current, restored)) {
++            const completed: ScheduleStateOperation = { ...operation, phase: "restored" };
++            await this.writeOperation(completed);
++            return completed;
++        }
++        if (current && this.matchesReceipt(current, operation.after)) {
++            const restoredPersisted = PersistedScheduleSchema.parse({
++                ...restored.schedule,
++                _mutationVersion: restored.version,
++            });
++            await this.writePersisted(restoredPersisted);
++            const completed: ScheduleStateOperation = { ...operation, phase: "restored" };
++            await this.writeOperation(completed);
++            return completed;
++        }
++        throw new Error(`Schedule ${operation.scheduleId} changed during restore ${operation.operationId}`);
++    }
++
++private toReceipt(schedule: PersistedSchedule): ScheduleStateReceipt {
++        const stored = this.toStoredSchedule(schedule);
++        return {
++            version: schedule._mutationVersion,
++            state: {
++                status: stored.status,
++                pausedAt: stored.pausedAt,
++                nextRunAt: stored.nextRunAt,
++            },
++            schedule: stored,
++        };
++    }
++
++private matchesReceipt(schedule: PersistedSchedule, receipt: ScheduleStateReceipt): boolean {
++        return (schedule._mutationVersion.generation === receipt.version.generation &&
++            schedule._mutationVersion.sequence === receipt.version.sequence &&
++            schedule.status === receipt.state.status &&
++            schedule.pausedAt === receipt.state.pausedAt &&
++            schedule.nextRunAt === receipt.state.nextRunAt);
++    }
++
++private assertMatchingOperation(operation: ScheduleStateOperation, input: { operationId: string; scheduleId: string; targetStatus: "active" | "paused" }): void {
++        if (operation.scheduleId !== input.scheduleId ||
++            operation.targetStatus !== input.targetStatus) {
++            throw new Error(`Schedule state operation id already used: ${input.operationId}`);
++        }
++    }
++
++private async getOperation(operationId: string): Promise<ScheduleStateOperation | null> {
++        try {
++            const content = await readFile(this.operationFilePath(operationId), "utf-8");
++            const operation = ScheduleStateOperationSchema.parse(JSON.parse(content));
++            if (operation.operationId !== operationId) {
++                throw new Error(`Schedule state operation hash collision: ${operationId}`);
++            }
++            return operation;
++        }
++        catch (error) {
++            if ((error as NodeJS.ErrnoException).code === "ENOENT") {
++                return null;
++            }
++            throw error;
++        }
++    }
++
++private async writeOperation(operation: ScheduleStateOperation): Promise<void> {
++        await mkdir(join(this.dir, "operations"), { recursive: true });
++        await writeJsonFileAtomic(this.operationFilePath(operation.operationId), operation);
++    }
++
++async transitionState(input: {
++        operationId: string;
++        scheduleId: string;
++        targetStatus: "active" | "paused";
++    }, transition: ScheduleUpdater): Promise<ScheduleStateOperationResult> {
++        return this.serializeIdentityMutation(`state-operation:${input.operationId}`, async () => {
++            const existing = await this.getOperation(input.operationId);
++            if (existing) {
++                this.assertMatchingOperation(existing, input);
++                if (existing.phase === "restored" || existing.phase === "restore-prepared") {
++                    throw new Error(`Schedule state operation ${input.operationId} was already restored`);
++                }
++                return this.serializeScheduleMutation(input.scheduleId, async () => {
++                    const operation = await this.reconcileTransition(existing);
++                    const current = await this.getPersisted(input.scheduleId);
++                    return {
++                        schedule: operation.after.schedule,
++                        replayed: true,
++                        isCurrent: current !== null && this.matchesReceipt(current, operation.after),
++                    };
++                });
++            }
++            return this.serializeScheduleMutation(input.scheduleId, async () => {
++                const raced = await this.getOperation(input.operationId);
++                if (raced) {
++                    this.assertMatchingOperation(raced, input);
++                    const operation = await this.reconcileTransition(raced);
++                    const current = await this.getPersisted(input.scheduleId);
++                    return {
++                        schedule: operation.after.schedule,
++                        replayed: true,
++                        isCurrent: current !== null && this.matchesReceipt(current, operation.after),
++                    };
++                }
++                const beforePersisted = await this.getPersisted(input.scheduleId);
++                if (!beforePersisted) {
++                    throw new Error(`Schedule not found: ${input.scheduleId}`);
++                }
++                const before = this.toStoredSchedule(beforePersisted);
++                const after = StoredScheduleSchema.parse(await transition(before));
++                if (after.id !== input.scheduleId) {
++                    throw new Error(`Schedule update cannot change id: ${input.scheduleId}`);
++                }
++                const afterPersisted = {
++                    ...after,
++                    _mutationVersion: this.nextMutationVersion(beforePersisted._mutationVersion),
++                };
++                const operation: ScheduleStateOperation = {
++                    ...input,
++                    phase: "prepared",
++                    before: this.toReceipt(beforePersisted),
++                    after: this.toReceipt(afterPersisted),
++                };
++                await this.writeOperation(operation);
++                await this.testHooks.afterOperationPrepared?.();
++                await this.writePersisted(afterPersisted);
++                await this.testHooks.afterScheduleWritten?.();
++                await this.writeOperation({ ...operation, phase: "applied" });
++                return { schedule: after, replayed: false, isCurrent: true };
++            });
++        });
++    }
++
++async restoreState(input: {
++        operationId: string;
++        scheduleId: string;
++    }, restore: (schedule: StoredSchedule, state: ScheduleState) => StoredSchedule): Promise<ScheduleStateOperationResult> {
++        return this.serializeIdentityMutation(`state-operation:${input.operationId}`, async () => {
++            const operation = await this.getOperation(input.operationId);
++            if (!operation) {
++                throw new Error(`Schedule state operation not found: ${input.operationId}`);
++            }
++            if (operation.scheduleId !== input.scheduleId) {
++                throw new Error(`Schedule state operation ${input.operationId} belongs to another schedule`);
++            }
++            return this.serializeScheduleMutation(input.scheduleId, async () => {
++                let reconciled = await this.reconcileTransition(operation);
++                if (reconciled.phase === "restored") {
++                    const current = await this.getPersisted(input.scheduleId);
++                    return {
++                        schedule: reconciled.restored!.schedule,
++                        replayed: true,
++                        isCurrent: current !== null && this.matchesReceipt(current, reconciled.restored!),
++                    };
++                }
++                if (reconciled.phase === "restore-prepared") {
++                    reconciled = await this.reconcileRestore(reconciled);
++                    return { schedule: reconciled.restored!.schedule, replayed: true, isCurrent: true };
++                }
++                const current = await this.getPersisted(input.scheduleId);
++                if (!current || !this.matchesReceipt(current, reconciled.after)) {
++                    throw new Error(`Schedule ${input.scheduleId} changed after operation ${input.operationId}; refusing restore`);
++                }
++                const restoredSchedule = StoredScheduleSchema.parse(restore(this.toStoredSchedule(current), reconciled.before.state));
++                const restoredPersisted = {
++                    ...restoredSchedule,
++                    _mutationVersion: this.nextMutationVersion(current._mutationVersion),
++                };
++                reconciled = {
++                    ...reconciled,
++                    phase: "restore-prepared",
++                    restored: this.toReceipt(restoredPersisted),
++                };
++                await this.writeOperation(reconciled);
++                await this.testHooks.afterRestorePrepared?.();
++                await this.writePersisted(restoredPersisted);
++                await this.testHooks.afterRestoreScheduleWritten?.();
++                reconciled = { ...reconciled, phase: "restored" };
++                await this.writeOperation(reconciled);
++                return { schedule: restoredSchedule, replayed: false, isCurrent: true };
++            });
++        });
++    }
++}
+--- a/packages/server/src/server/session.ts
++++ b/packages/server/src/server/session.ts
+@@ -1,3 +1,6 @@
++import { AgentMessageSendGuardRejectedError, isAgentMessageSendGuardRejectedError } from "./agent/agent-manager.js";
++// StationDesk modification, 2026-10-30: guard source reconstructed from the distributed 0.8.0 overlay.
++// Upstream portions: Apache-2.0; StationDesk modifications: AGPL-3.0-only.
+ import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+ import type { AgentRequests } from "./agent/requests/index.js";
+ import equal from "fast-deep-equal";
+@@ -2722,6 +2725,10 @@
+         return this.scheduleSession.handleSchedulePauseRequest(msg);
+       case "schedule/resume":
+         return this.scheduleSession.handleScheduleResumeRequest(msg);
++      case "schedule.state.transition.request":
++        return this.scheduleSession.handleScheduleStateTransitionRequest(msg);
++      case "schedule.state.restore.request":
++        return this.scheduleSession.handleScheduleStateRestoreRequest(msg);
+       case "schedule/delete":
+         return this.scheduleSession.handleScheduleDeleteRequest(msg);
+       case "schedule/run-once":
+@@ -7570,88 +7577,114 @@
+   private async handleSendAgentMessageRequest(
+     msg: Extract<SessionInboundMessage, { type: "send_agent_message_request" }>,
+   ): Promise<void> {
+-    const resolved = await this.resolveAgentIdentifier(msg.agentId);
+-    if (!resolved.ok) {
+-      this.emit({
+-        type: "send_agent_message_response",
+-        payload: {
+-          requestId: msg.requestId,
+-          agentId: msg.agentId,
+-          accepted: false,
+-          error: resolved.error,
+-        },
+-      });
+-      return;
+-    }
+-
+-    try {
+-      const agentId = resolved.agentId;
+-
+-      const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
+-      this.sessionLogger.trace(
+-        {
+-          agentId,
+-          messageId: msg.messageId,
+-          activeTurnBehavior: msg.activeTurnBehavior,
+-          textPrefix: msg.text.slice(0, 80),
+-        },
+-        "agent.session.send_agent_message",
+-      );
+-      const send = async () => {
+-        const result = await sendPromptToAgent({
+-          agentManager: this.agentManager,
+-          agentStorage: this.agentStorage,
+-          agentId,
+-          prompt,
+-          messageId: msg.messageId,
+-          activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
+-          clearPendingPermissions: true,
+-          logger: this.sessionLogger,
+-        });
+-        if (result.disposition === "turn_started") {
+-          await waitForAgentRunStartWithTimeout(this.agentManager, agentId);
++        const resolved = await this.resolveAgentIdentifier(msg.agentId);
++        if (!resolved.ok) {
++            this.emit({
++                type: "send_agent_message_response",
++                payload: {
++                    requestId: msg.requestId,
++                    agentId: msg.agentId,
++                    accepted: false,
++                    error: resolved.error,
++                    ...(msg.guard ? { guard: { matched: false, reason: "agent_id_mismatch" } } : {}),
++                },
++            });
++            return;
+         }
+-      };
+-      if (msg.messageId) {
+-        await this.agentRequests.send({
+-          agentId,
+-          messageId: msg.messageId,
+-          request: { prompt, activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt" },
+-          prepare: async () => {
+-            await ensureAgentLoaded(agentId, {
+-              agentManager: this.agentManager,
+-              agentStorage: this.agentStorage,
+-              logger: this.sessionLogger,
++        try {
++            const agentId = resolved.agentId;
++            // A guard names the exact agent it was issued for. A prefix or title
++            // that merely resolves to that agent is not authority for a guarded send.
++            if (msg.guard && msg.agentId !== msg.guard.expectedAgentId) {
++                throw new AgentMessageSendGuardRejectedError("agent_id_mismatch");
++            }
++            const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
++            this.sessionLogger.trace({
++                agentId,
++                messageId: msg.messageId,
++                activeTurnBehavior: msg.activeTurnBehavior,
++                textPrefix: msg.text.slice(0, 80),
++            }, "agent.session.send_agent_message");
++            const dispatch = () => sendPromptToAgent({
++                agentManager: this.agentManager,
++                agentStorage: this.agentStorage,
++                agentId,
++                prompt,
++                messageId: msg.messageId,
++                guard: msg.guard,
++                activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
++                clearPendingPermissions: true,
++                logger: this.sessionLogger,
+             });
+-          },
+-          send,
+-        });
+-      } else {
+-        await send();
+-      }
+-
+-      this.emit({
+-        type: "send_agent_message_response",
+-        payload: {
+-          requestId: msg.requestId,
+-          agentId,
+-          accepted: true,
+-          error: null,
+-        },
+-      });
+-    } catch (error) {
+-      this.handleAgentRunError(resolved.agentId, error, "Failed to send agent message");
+-      this.emit({
+-        type: "send_agent_message_response",
+-        payload: {
+-          requestId: msg.requestId,
+-          agentId: resolved.agentId,
+-          accepted: false,
+-          error: errorToFriendlyMessage(error),
+-        },
+-      });
+-    }
+-  }
++            let result: Awaited<ReturnType<typeof sendPromptToAgent>> | undefined;
++            if (msg.messageId) {
++                await this.agentRequests.send({
++                    agentId,
++                    messageId: msg.messageId,
++                    request: {
++                        prompt,
++                        guard: msg.guard,
++                        activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
++                    },
++                    // A guarded send must check-and-dispatch atomically before any
++                    // pending receipt is persisted below: `send()` has no recovery
++                    // path, so a rejection thrown from it would leave a stale
++                    // "pending" receipt this journal could never clear. Running the
++                    // whole guarded dispatch inside `prepare` means a rejection
++                    // throws before any receipt file is written at all.
++                    prepare: msg.guard
++                        ? async () => {
++                            result = await dispatch();
++                        }
++                        : async () => {
++                            await ensureAgentLoaded(agentId, {
++                                agentManager: this.agentManager,
++                                agentStorage: this.agentStorage,
++                                logger: this.sessionLogger,
++                            });
++                        },
++                    send: async () => {
++                        result ?? (result = await dispatch());
++                        if (result.disposition === "turn_started") {
++                            await waitForAgentRunStartWithTimeout(this.agentManager, agentId);
++                        }
++                    },
++                });
++            }
++            else {
++                result = await dispatch();
++                if (result.disposition === "turn_started") {
++                    await waitForAgentRunStartWithTimeout(this.agentManager, agentId);
++                }
++            }
++            this.emit({
++                type: "send_agent_message_response",
++                payload: {
++                    requestId: msg.requestId,
++                    agentId,
++                    accepted: true,
++                    error: null,
++                    ...(msg.guard ? { guard: { matched: true, reason: null } } : {}),
++                },
++            });
++        }
++        catch (error) {
++            const guardRejection = isAgentMessageSendGuardRejectedError(error) ? error : null;
++            if (!guardRejection) {
++                this.handleAgentRunError(resolved.agentId, error, "Failed to send agent message");
++            }
++            this.emit({
++                type: "send_agent_message_response",
++                payload: {
++                    requestId: msg.requestId,
++                    agentId: resolved.agentId,
++                    accepted: false,
++                    error: errorToFriendlyMessage(error),
++                    ...(guardRejection ? { guard: { matched: false, reason: guardRejection.reason } } : {}),
++                },
++            });
++        }
++    }
+ 
+   private async handleWaitForFinish(
+     agentIdOrIdentifier: string,
+--- a/packages/server/src/server/session/schedule/schedule-session.ts
++++ b/packages/server/src/server/session/schedule/schedule-session.ts
+@@ -1,3 +1,5 @@
++// StationDesk modification, 2026-10-30: guard source reconstructed from the distributed 0.8.0 overlay.
++// Upstream portions: Apache-2.0; StationDesk modifications: AGPL-3.0-only.
+ import type pino from "pino";
+ import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
+ import type { ScheduleService } from "../../schedule/service.js";
+@@ -46,7 +48,9 @@
+           | "schedule/resume"
+           | "schedule/delete"
+           | "schedule/run-once"
+-          | "schedule/update";
++          | "schedule/update"
++          | "schedule.state.transition.request"
++          | "schedule.state.restore.request";
+       }
+     >,
+     error: unknown,
+@@ -184,7 +188,56 @@
+     }
+   }
+ 
+-  async handleScheduleDeleteRequest(
++  async handleScheduleStateTransitionRequest(request: Extract<SessionInboundMessage, {
++        type: "schedule.state.transition.request";
++    }>): Promise<void> {
++        try {
++            const result = await this.scheduleService.transitionState({
++                operationId: request.operationId,
++                scheduleId: request.scheduleId,
++                targetStatus: request.targetStatus,
++            });
++            this.host.emit({
++                type: "schedule.state.transition.response",
++                payload: {
++                    requestId: request.requestId,
++                    operationId: request.operationId,
++                    schedule: this.toScheduleSummary(result.schedule),
++                    replayed: result.replayed,
++                    isCurrent: result.isCurrent,
++                },
++            });
++        }
++        catch (error) {
++            this.emitScheduleRpcError(request, error);
++        }
++    }
++
++async handleScheduleStateRestoreRequest(request: Extract<SessionInboundMessage, {
++        type: "schedule.state.restore.request";
++    }>): Promise<void> {
++        try {
++            const result = await this.scheduleService.restoreState({
++                operationId: request.operationId,
++                scheduleId: request.scheduleId,
++            });
++            this.host.emit({
++                type: "schedule.state.restore.response",
++                payload: {
++                    requestId: request.requestId,
++                    operationId: request.operationId,
++                    schedule: this.toScheduleSummary(result.schedule),
++                    replayed: result.replayed,
++                    isCurrent: result.isCurrent,
++                },
++            });
++        }
++        catch (error) {
++            this.emitScheduleRpcError(request, error);
++        }
++    }
++
++async handleScheduleDeleteRequest(
+     request: Extract<SessionInboundMessage, { type: "schedule/delete" }>,
+   ): Promise<void> {
+     try {
+--- a/packages/server/src/server/websocket-server.ts
++++ b/packages/server/src/server/websocket-server.ts
+@@ -1,3 +1,5 @@
++// StationDesk modification, 2026-10-30: guard source reconstructed from the distributed 0.8.0 overlay.
++// Upstream portions: Apache-2.0; StationDesk modifications: AGPL-3.0-only.
+ import { AgentRequests } from "./agent/requests/index.js";
+ import { WebSocket, WebSocketServer } from "ws";
+ import type { IncomingMessage, Server as HTTPServer } from "http";
+@@ -1634,6 +1636,8 @@
+       features: {
+         agentRequestReceipts: true,
+         hubAgentRpc: true,
++        agentMessageSendGuard: true,
++        scheduleStateRestore: true,
+         // COMPAT(directorySync): added in v0.3.x, remove gate after 2027-02-12.
+         directorySync: true,
+         // COMPAT(workspaceLabels): added in v0.5.0, remove after 2027-08-14.

@@ -1,0 +1,30 @@
+[Unit]
+Description=StationDesk Orca ADE headless runtime
+# Stopping the guard or display (app removal too) stops Orca first.
+Requires=stationdesk-orca-guard.service stationdesk-orca-xvfb.service
+After=network.target stationdesk-orca-guard.service stationdesk-orca-xvfb.service
+[Service]
+Type=simple
+Environment=LIBGL_ALWAYS_SOFTWARE=1
+Environment=DISPLAY=:59
+# serve.log holds the pairing URL; it lives only while the runtime runs.
+RuntimeDirectory=stationdesk-orca
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+ExecStartPre=/bin/sh -c 'for _ in $$(seq 1 100); do [ -S /tmp/.X11-unix/X59 ] && exit 0; sleep 0.1; done; echo "X59 socket not ready"; exit 1'
+# --pairing-address rewrites the endpoint the web client dials to the HTTPS gate
+# (the default ws://0.0.0.0:PORT is not browser-reachable). The web client URL is
+# printed only to stdout, so capture it in serve.log.
+ExecStart=/bin/sh -c 'squashfs="$$STATIONDESK_ROOT/runtime/orca/squashfs-root"; export APPDIR="$$squashfs"; exec "$$squashfs/AppRun" serve --port "$$STATIONDESK_PORT" --pairing-code "$$(cat "$$HOME/.config/orca/stationdesk-pairing-code")" --pairing-address "wss://$$STATIONDESK_FQDN:19940" > "$$RUNTIME_DIRECTORY/serve.log" 2>&1'
+ExecStartPost=/bin/bash ${STATIONDESK_APP_DIR}/ready.sh
+TimeoutStartSec=180
+# The daemon self-detaches into app-orca-*.scope, so reclaim it on stop.
+ExecStopPost=/bin/bash ${STATIONDESK_APP_DIR}/reap.sh
+Restart=on-failure
+RestartSec=3
+# Backstop only: app-orca-*.scope lives in app.slice, outside this cap.
+MemoryMax=8G
+TasksMax=1024
+NoNewPrivileges=yes
+[Install]
+WantedBy=default.target

@@ -1,0 +1,11 @@
+label = "Publish"
+description = "Static site publishing"
+description_ko = "정적 사이트 발행"
+icon = "icon.svg"
+port = 19924
+serve = 8000
+files = [
+  {path = "~/.claude/skills/share-docs", target = "share-docs"},
+  {path = "~/.agents/skills/share-docs", target = "share-docs"},
+]
+endpoints = "publish/funnel-endpoints.json"

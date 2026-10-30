@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bench</title>
+<meta name="application-name" content="Bench">
+<meta name="apple-mobile-web-app-title" content="Bench">
+<link rel="icon" type="image/png" href="icon.png">
+
+<style>
+  :root { color-scheme:dark; --bg:#141719; --side:#1b1f22; --surface:#202528; --line:#30373a; --fg:#eef1ed; --dim:#9ba8aa; --accent:#cedfb0; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:14px/1.6 system-ui,"Apple SD Gothic Neo","Malgun Gothic",sans-serif; }
+  body { display:flex; }
+  button { font:inherit; color:inherit; cursor:pointer; }
+  button:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+  svg { display:block; width:20px; height:20px; flex:none; }
+  nav { width:260px; flex:none; background:var(--side); border-right:1px solid var(--line); display:flex; flex-direction:column; }
+  .brand { display:flex; align-items:center; gap:12px; padding:24px 20px 20px; }
+  .brand-mark { display:block; width:36px; height:36px; flex:none; border-radius:11px; }
+  .brand h1 { margin:0; font-size:20px; font-weight:650; letter-spacing:-.6px; }
+  .brand p { margin:0; font-size:11px; color:var(--dim); }
+  #toggle { display:grid; place-items:center; flex:none; width:30px; height:30px; padding:0; margin-left:auto; background:transparent; border:1px solid var(--line); border-radius:7px; color:var(--dim); }
+  #toggle:hover { color:var(--fg); background:var(--surface); }
+  .app-list { flex:1; padding:0 12px 16px; overflow-y:auto; }
+  .nav-app { display:flex; align-items:center; gap:12px; width:100%; min-height:50px; padding:8px 10px; margin:3px 0; border:1px solid transparent; border-radius:9px; background:transparent; text-align:left; }
+  .nav-app:hover { background:#252c2f; }
+  .nav-app.on { border-color:#44523c; background:#2b3429; }
+  .nav-app > img, .home-icon { width:30px; height:30px; flex:none; }
+  .home-icon { display:grid; place-items:center; color:var(--accent); }
+  .nav-copy { display:block; min-width:0; }
+  .nav-name { display:block; font-size:13px; font-weight:550; line-height:1.4; }
+  .nav-meta { display:block; color:var(--dim); font-size:10px; margin-top:2px; }
+  .nav-app.loaded::after { content:""; width:5px; height:5px; flex:none; margin-left:auto; border-radius:50%; background:var(--accent); }
+  .sep { height:1px; margin:14px 10px; background:var(--line); }
+  .list-label { margin:16px 10px 8px; font-size:10px; letter-spacing:1.5px; color:var(--dim); }
+  nav.collapsed { width:76px; }
+  nav.collapsed .brand { justify-content:center; padding:24px 0 18px; }
+  nav.collapsed .brand-mark, nav.collapsed .brand-copy, nav.collapsed .nav-copy, nav.collapsed .list-label { display:none; }
+  nav.collapsed #toggle { margin:0; }
+  nav.collapsed #toggle svg { transform:rotate(180deg); }
+  nav.collapsed .app-list { padding:0 10px 16px; }
+  nav.collapsed .nav-app { justify-content:center; padding:9px 0; position:relative; }
+  nav.collapsed .nav-app.loaded::after { position:absolute; right:5px; bottom:7px; }
+  main { flex:1; position:relative; min-width:0; }
+  main > iframe { position:absolute; inset:0; width:100%; height:100%; border:0; display:none; background:#262626; }
+  main > iframe.on { display:block; }
+  #home { position:absolute; inset:0; overflow-y:auto; padding:48px clamp(24px,4vw,64px) 56px; display:none; }
+  #home.on { display:block; }
+  .home-content { max-width:1180px; margin:auto; }
+  .eyebrow { color:var(--accent); font-size:11px; letter-spacing:2px; margin:0 0 10px; }
+  #home h2 { font-size:40px; font-weight:550; letter-spacing:-1.8px; line-height:1.15; margin:0; }
+  .subtitle { color:var(--dim); margin:10px 0 28px; }
+  .section-head { display:flex; align-items:center; justify-content:space-between; margin:30px 0 14px; }
+  .section-head h3 { margin:0; font-size:16px; font-weight:550; letter-spacing:-.3px; }
+  .section-head span { color:var(--dim); font-size:12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+  .card { display:block; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:18px; text-align:left; }
+  .card:hover { border-color:#758662; background:#262e2e; }
+  .card-top { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
+  .card img { width:40px; height:40px; flex:none; }
+  .card b { display:block; font-size:15px; font-weight:550; letter-spacing:-.2px; }
+  .card .arrow { margin-left:auto; color:#778485; font-size:19px; }
+  .card .desc { display:block; color:#bdc7c6; font-size:12px; }
+  .card .replaces { display:block; color:var(--dim); font-size:10px; margin-top:4px; }
+  .note { padding:16px 20px; background:#242b22; border:1px solid #3b4735; border-radius:10px; color:#c8d2c0; font-size:12px; }
+  .note p { margin:0; }
+  .drive { margin-top:36px; padding-top:6px; border-top:1px solid var(--line); }
+  .drive p, .drive li { color:var(--dim); font-size:12px; }
+  .drive b { color:#d2d9d6; font-weight:550; }
+  code { background:#252d2e; color:#d0d8d5; padding:2px 5px; border-radius:4px; overflow-wrap:anywhere; }
+  ul { padding-left:20px; }
+  li + li { margin-top:8px; }
+  a { color:var(--accent); text-underline-offset:3px; }
+  @media(max-width:760px) { nav { width:216px; } .brand { padding:20px 12px; gap:8px; } .brand-mark { display:none; } #home { padding:30px 20px; } #home h2 { font-size:32px; } .grid { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<nav id="nav" aria-label="Bench 앱">
+  <div class="brand">
+    <img class="brand-mark" src="icon.png" alt="" width="36" height="36">
+    <div class="brand-copy"><h1>Bench</h1><p>크리에이티브 편집 도구</p></div>
+    <button id="toggle" type="button" aria-label="사이드바 접기" aria-expanded="true" aria-controls="app-list" title="사이드바 접기"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16m7-12-4 4 4 4"/></svg></button>
+  </div>
+  <div class="app-list" id="app-list">
+    <button type="button" data-id="" class="nav-app on" title="처음 화면" aria-label="처음 화면" aria-pressed="true"><span class="home-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg></span><span class="nav-copy"><span class="nav-name">처음 화면</span><span class="nav-meta">파일 열기·저장·사용법</span></span></button>
+    <div class="sep"></div>
+    <p class="list-label">APPLICATIONS</p>
+  </div>
+</nav>
+<main id="main">
+  <section id="home" class="on">
+    <div class="home-content">
+      <p class="eyebrow">YOUR CREATIVE WORKSPACE</p>
+      <h2>Bench</h2>
+      <p class="subtitle">크리에이티브 편집 도구 · 브라우저에서 쓰는 편집 도구</p>
+      <div class="note"><p>사진·벡터·문서·영상·오디오를 편집하는 오픈소스 웹 도구입니다. 아직 <b>초기 시험판</b>이라 오류가 잦으니 원본은 보관하고 <b>다른 이름으로 저장</b>하세요.<br>편집은 내 브라우저 안에서 이루어집니다. 저장하지 않고 창을 닫으면 작업이 사라집니다.</p></div>
+      <div class="section-head"><h3>앱 선택</h3><span id="app-count"></span></div>
+      <div class="grid" id="cards"></div>
+      <section class="drive">
+        <div class="section-head"><h3>사용법</h3><span>파일 열기·저장</span></div>
+        <p>앱의 <b>열기</b>는 내 컴퓨터의 파일 선택 창을 띄우고, <b>저장</b>은 파일을 내려받습니다.</p>
+        <ul>
+          <li>저장 위치를 고르려면 브라우저 설정에서 <b>「다운로드 전에 저장 위치 묻기」</b>를 켜 두세요.</li>
+        </ul>
+      </section>
+      <p class="attribution" style="color:var(--dim);font-size:11px;margin-top:28px">@@ATTRIBUTION@@</p>
+    </div>
+  </section>
+</main>
+<script>
+(async () => {
+  const nav = document.getElementById("nav"), list = document.getElementById("app-list");
+  const main = document.getElementById("main"), home = document.getElementById("home");
+  const cards = document.getElementById("cards"), toggle = document.getElementById("toggle");
+  const frames = {};
+  let apps = [];
+  try { apps = (await (await fetch("apps.json", { cache: "no-cache" })).json()).apps; }
+  catch (e) { cards.textContent = "앱 목록을 읽지 못했습니다: " + e; }
+
+  toggle.onclick = () => {
+    const collapsed = nav.classList.toggle("collapsed");
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.title = collapsed ? "사이드바 펼치기" : "사이드바 접기";
+    toggle.setAttribute("aria-label", toggle.title);
+  };
+
+  function show(id) {
+    for (const b of list.querySelectorAll("button[data-id]")) {
+      const selected = b.dataset.id === id;
+      b.classList.toggle("on", selected);
+      b.setAttribute("aria-pressed", String(selected));
+    }
+    home.classList.toggle("on", !id);
+    for (const [k, f] of Object.entries(frames)) f.classList.toggle("on", k === id);
+    if (id && !frames[id]) {
+      const f = document.createElement("iframe");
+      f.src = matchMedia('(pointer:coarse)').matches
+        ? "stationdesk-bench.html?app=" + encodeURIComponent(id)
+        : id + "/";
+      f.title = apps.find(a => a.id === id).name;
+      f.allow = "fullscreen; clipboard-read; clipboard-write";
+      f.className = "on";
+      main.appendChild(f);
+      frames[id] = f;
+      list.querySelector(`button[data-id="${id}"]`).classList.add("loaded");
+    }
+    history.replaceState(null, "", id ? "#" + id : location.pathname);
+    document.title = id ? `${apps.find(a => a.id === id).name} — Bench` : "Bench";
+  }
+
+  function element(tag, className, text) {
+    const e = document.createElement(tag);
+    if (className) e.className = className;
+    if (text) e.textContent = text;
+    return e;
+  }
+  function icon(id) {
+    const img = element("img");
+    img.src = `icons/${id}.png`;
+    img.alt = "";
+    img.width = img.height = 64;
+    return img;
+  }
+  document.getElementById("app-count").textContent = `${apps.length}개의 도구`;
+  for (const a of apps) {
+    const b = element("button", "nav-app");
+    b.type = "button";
+    b.dataset.id = a.id;
+    b.title = a.name;
+    b.setAttribute("aria-label", a.name);
+    b.setAttribute("aria-pressed", "false");
+    const copy = element("span", "nav-copy");
+    copy.append(element("span", "nav-name", a.name), element("span", "nav-meta", `${a.desc} · ${a.version}`));
+    b.append(icon(a.id), copy);
+    b.onclick = () => show(a.id);
+    list.appendChild(b);
+    const c = element("button", "card"), top = element("span", "card-top");
+    c.type = "button";
+    const arrow = element("span", "arrow", "→");
+    arrow.setAttribute("aria-hidden", "true");
+    top.append(icon(a.id), element("b", "", a.name), arrow);
+    c.append(top, element("span", "desc", a.desc), element("span", "replaces", a.version));
+    c.onclick = () => show(a.id);
+    cards.appendChild(c);
+  }
+  list.querySelector('button[data-id=""]').onclick = () => show("");
+  window.addEventListener("beforeunload", e => { if (Object.keys(frames).length) e.preventDefault(); });
+  const start = location.hash.slice(1);
+  if (apps.some(a => a.id === start)) show(start);
+})();
+</script>
+</body>
+</html>

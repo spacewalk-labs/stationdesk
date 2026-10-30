@@ -1,0 +1,26 @@
+[Unit]
+Description=StationDesk Paseo daemon and web UI
+After=network.target
+StartLimitIntervalSec=30
+StartLimitBurst=3
+[Service]
+Type=simple
+Environment="PATH=%h/.local/bin:%h/.npm-global/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
+Environment=HOME=%h
+Environment=XDG_CONFIG_HOME=%h/.config
+Environment=PASEO_HOME=%h/.paseo
+Environment=PASEO_TRUSTED_PROXIES=127.0.0.1
+Environment=PASEO_DICTATION_ENABLED=false
+Environment=PASEO_VOICE_MODE_ENABLED=false
+Environment=PASEO_IDLE_UNLOAD_MINUTES=360
+# env expands the engine's runtime root before the foreground process starts.
+ExecStart=/bin/bash -c 'export PATH="$$STATIONDESK_ROOT/runtime/node/bin:$$STATIONDESK_ROOT/runtime/paseo/bin:$$PATH"; export PASEO_HOSTNAMES="$$STATIONDESK_FQDN,$$STATIONDESK_FQDN:19950,localhost"; exec "$$STATIONDESK_ROOT/runtime/paseo/bin/paseo" daemon start --foreground --no-relay --web-ui --listen "127.0.0.1:$$STATIONDESK_PORT"'
+# Installation completes when the web UI accepts requests, not when Node is spawned.
+# systemd's existing start timeout bounds this wait and keeps failures visible.
+ExecStartPost=/bin/bash -c 'until curl --fail --silent --output /dev/null "http://127.0.0.1:$$STATIONDESK_PORT/"; do sleep 1; done'
+Restart=always
+RestartSec=3
+# Agent children are the owner's interactive sessions and need sudo.
+NoNewPrivileges=no
+[Install]
+WantedBy=default.target

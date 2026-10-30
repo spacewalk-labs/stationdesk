@@ -1,0 +1,8 @@
+[Unit]
+Description=StationDesk Bench
+[Service]
+ExecStart=/usr/bin/python3 -B -m http.server ${STATIONDESK_PORT} --bind 127.0.0.1 --directory ${STATIONDESK_ROOT}/web/bench
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=default.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=StationDesk terminal PTY backend
+[Service]
+ExecStart=/opt/stationdesk/apps/devterm/bin/devterm-ttyd
+# Keep the tmux server and its work when ttyd is restarted.
+KillMode=process
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=default.target

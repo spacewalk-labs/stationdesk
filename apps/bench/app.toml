@@ -1,0 +1,7 @@
+label = "Bench"
+description = "Editing tools — web editors for images, vectors, documents, and video"
+description_ko = "편집 도구 모음 — 이미지·벡터·문서·영상 웹 편집기"
+icon = "icon.png"
+port = 19972
+serve = 19970
+files = ["web/bench"]

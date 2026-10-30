@@ -1,0 +1,11 @@
+[Unit]
+Description=StationDesk hello example
+StartLimitBurst=5
+
+[Service]
+ExecStart=/usr/bin/python3 -m http.server ${STATIONDESK_PORT} --bind 127.0.0.1 --directory ${STATIONDESK_ROOT}/web/hello
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

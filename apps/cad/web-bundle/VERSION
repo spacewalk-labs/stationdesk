@@ -1,0 +1,7 @@
+0.6.2-e707ab4-hangul-2
+CADCraft e707ab4d7cc10102e550ad4c5bcecef1084a9baa
+craft-fonts 3d9ab3a132ed0eff457e424226a435a901da30d3
+
+5fef8b577e82b43142635484e885d9fe8913b40458b7d1850567ae8484d646d9  dist/cadcraft-web-90bff33e9d3a1929.js
+95e40873751ef328ada23959281b8f7ded08e6a9de56362a5b02ea3deae2f228  dist/cadcraft-web-90bff33e9d3a1929_bg.wasm
+333ab49cb57e1c3d648c1f4ea320da875c4ebaa6eea69362921cf4bcddc6c0eb  dist/index.html

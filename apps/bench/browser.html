@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=yes">
+  <title>Bench</title>
+  <style>
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#262626}
+    iframe{display:block;border:0;transform-origin:0 0}
+  </style>
+</head>
+<body>
+  <iframe title="Bench editor" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+  <script>
+    const frame = document.querySelector('iframe');
+    const app = new URLSearchParams(location.search).get('app');
+    frame.src = '/' + encodeURIComponent(app) + '/';
+    function fit() {
+      const scale = innerWidth / 1440;
+      frame.style.width = '1440px';
+      frame.style.height = (innerHeight / scale) + 'px';
+      frame.style.transform = 'scale(' + scale + ')';
+    }
+    fit();
+    addEventListener('resize', fit);
+  </script>
+</body>
+</html>

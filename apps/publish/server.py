@@ -1,0 +1,2531 @@
+#!/usr/bin/env python3
+"""stationdesk-publish — static-share manager + optional pluggable external publish.
+
+Runs on loopback (127.0.0.1:<backend_port>); the hub nginx proxies /publish/api/
+here. It manages a local static-share directory (default /opt/stationdesk/share): list,
+unpublish (unlink symlinks, keeping the original), delete direct files (2-step
+confirm), batch, repair broken symlinks, and accept clipboard/file uploads into
+~/uploads (the notepad drop). Configuration is supplied through the StationDesk app environment and optional
+state/publish.env file.
+
+Optional external publish is a PLUGGABLE target with TWO backends, chosen by
+the STATIONDESK_PUBLISH_PUBLIC_MODE environment variable:
+
+  mode = "remote" (default) — POST the snapshot to YOUR ingest service
+      (STATIONDESK_PUBLISH_INGEST_URL + base_url + token). You host the receiver.
+  mode = "local"            — write the snapshot into a public directory that
+      THIS box's nginx serves (STATIONDESK_PUBLISH_PUBLIC_DIR + base_url). No second
+      service, no token; expiry is enforced by this process (list/ingest sweep +
+      the --cleanup timer).
+
+Unconfigured => the installer publishes through Tailscale Funnel (install.sh writes
+state/publish/funnel.env, mode "local"). Explicitly configured => that target, no Funnel.
+
+Ingest protocol (what a REMOTE target must implement) — JSON over HTTPS, the
+token in the `X-StationDesk-Publish-Token` header (rename with
+      STATIONDESK_PUBLISH_TOKEN_HEADER when the receiver expects another):
+  POST <ingest>/ingest      {slug, owner, src, title, ttl_hours, html_b64} -> {ok, result:{expiry, ttl_hours}}
+  GET  <ingest>/list?owner= -> {ok, items:[{slug, owner, src, title, expiry, expired, mode}]}
+  POST <ingest>/revoke      {slug, owner} -> {ok}
+  POST <ingest>/set-expiry  {slug, owner, ttl_hours} -> {ok}
+Remote mode accepts only one open document; bundle files and password-gated
+publishing are local-target features and are rejected before ingest.
+The public URL shown to the user is `<base_url>/<slug>/`.
+
+Design notes for the local target live in docs/design/publish-local-target.md.
+"""
+import base64
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+from html import unescape as html_unescape
+from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import quote
+
+
+class Share:
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def item(self, name):
+        # Names address direct children; never traverse a published symlink.
+        if not isinstance(name, str) or name in ('', '.', '..', '_assets') or '/' in name or '\\' in name:
+            raise ValueError('Use a single file or folder name.')
+        return self.root / name
+
+    def list(self):
+        return [{'name': p.name, 'symlink': p.is_symlink(),
+                 'broken': not p.exists(), 'url': '/' + quote(p.name)}
+                for p in sorted(self.root.iterdir())]
+
+    def publish(self, source, name, mode='symlink'):
+        source = Path(source).expanduser().resolve(strict=True)
+        target = self.item(name)
+        if mode == 'symlink':
+            target.symlink_to(source, target_is_directory=source.is_dir())
+        elif mode == 'copy':
+            if source.is_dir():
+                if target.is_relative_to(source):
+                    raise ValueError('Cannot copy a folder into itself.')
+                shutil.copytree(source, target)
+            else:
+                with source.open('rb') as src, target.open('xb') as dst:
+                    shutil.copyfileobj(src, dst)
+        else:
+            raise ValueError('mode must be symlink or copy')
+
+    def unpublish(self, name):
+        target = self.item(name)
+        if not target.is_symlink():
+            raise ValueError('Only symlinks can be unpublished; direct files stay in the share folder.')
+        target.unlink()
+
+
+ROOT = os.path.expanduser(os.environ.get('STATIONDESK_SHARE', '/opt/stationdesk/share'))
+PORT = int(os.environ.get('STATIONDESK_PORT', '19924'))
+UPLOADS = os.path.expanduser(os.environ.get('STATIONDESK_PUBLISH_UPLOADS_DIR', '~/uploads'))
+HOME = os.path.expanduser('~')
+IDENTITY_HEADER = os.environ.get('STATIONDESK_IDENTITY_HEADER', 'Tailscale-User-Login')
+TITLE_META_ENABLED = os.environ.get('STATIONDESK_PUBLISH_TITLE_META', 'false').lower() == 'true'
+
+# ---- pluggable external publish target (all optional) ----
+INGEST_URL = os.environ.get('STATIONDESK_PUBLISH_INGEST_URL', '').rstrip('/')
+BASE_URL = os.environ.get('STATIONDESK_PUBLISH_BASE_URL', '').rstrip('/')
+# The openable link for a document in the share directory, or empty. The hub path
+# this UI used to hand out (/publish/files/<name>) is owner+collaborators only, so
+# a copied link 403s for everyone it is sent to while still working for the sender.
+DOC_URL = os.environ.get('STATIONDESK_PUBLISH_DOC_URL',
+    'https://' + os.environ['STATIONDESK_FQDN'] + ':8000' if os.environ.get('STATIONDESK_FQDN') else '').rstrip('/')
+# The token lives in an env var whose NAME is configured (secret stays out of the
+# config file); default STATIONDESK_PUBLISH_TOKEN. The installer wires an EnvironmentFile.
+_TOKEN_ENV = os.environ.get('STATIONDESK_PUBLISH_TOKEN_ENV', 'STATIONDESK_PUBLISH_TOKEN')
+TOKEN = os.environ.get(_TOKEN_ENV, '')
+# The header the RECEIVER authenticates with. Ours is the default, but a receiver
+# that already has publishers deployed against another name is the normal case, and
+# renaming on its side breaks all of them at once — so the publisher bends here.
+TOKEN_HEADER = (os.environ.get('STATIONDESK_PUBLISH_TOKEN_HEADER', '')
+                or 'X-StationDesk-Publish-Token')
+# "local" is opt-in and EXPLICIT. Inferring it from which keys are present would
+# silently turn a half-configured remote install (base_url left behind, token
+# gone) into a live public publisher, so the mode is never guessed.
+PUBLIC_MODE = (os.environ.get('STATIONDESK_PUBLISH_PUBLIC_MODE', '') or 'remote').strip().lower()
+PUBLIC_DIR = os.path.expanduser(os.environ.get('STATIONDESK_PUBLISH_PUBLIC_DIR', ''))
+STATE_DIR = os.path.expanduser(os.environ.get('STATIONDESK_PUBLISH_STATE_DIR', os.path.join(os.environ.get('STATIONDESK_ROOT', '/opt/stationdesk'), 'state/publish')))
+STATE_FILE = os.path.join(STATE_DIR, 'publish-public.json')
+LOCK_FILE = os.path.join(STATE_DIR, 'publish-public.lock')
+LOCAL_MAX_BYTES = 25 * 1024 * 1024      # local disk guard; the remote path stays unlimited
+RECONCILE_GRACE = 24 * 3600             # untracked slug dirs get swept after this
+TTL_MIN_H, TTL_MAX_H, TTL_DEFAULT_H = 1, 24 * 365, 336
+# Present in an open snapshot directory when its owner allows search engines (see funnel.conf).
+INDEXABLE = '.indexable'
+_RE_SLUG = re.compile(r'^[a-z0-9][a-z0-9-]{2,63}\Z')
+# Transaction siblings are private recovery records, never publishable slugs.
+_RE_TRANSACTION = re.compile(
+    r'^(?P<slug>[a-z0-9][a-z0-9-]{2,63})\.(?P<kind>old|stage|failed)-[0-9a-f]+\Z')
+
+# A plan is a short-lived, single-use capability for an explicit bundle build.
+MAX_BUNDLE_DOCS = 50
+MAX_BUNDLE_TOTAL_BYTES = 60 * 1024 * 1024
+BUNDLE_PLAN_TTL_S = 10 * 60
+MAX_BUNDLE_PLANS = 256
+_BUNDLE_PLANS = {}
+_BUNDLE_PLANS_LOCK = threading.Lock()
+
+# crypt was removed from Python 3.13. Use htpasswd's bcrypt implementation,
+# rather than embedding password hashing code in this service.
+GATED_DIR = os.path.expanduser(os.environ.get('STATIONDESK_PUBLISH_GATED_DIR', '/opt/stationdesk/share-gated'))
+HTPASSWD_DIR = os.path.expanduser(os.environ.get(
+    'STATIONDESK_PUBLISH_HTPASSWD_DIR', '/opt/stationdesk/publish-gated-auth'))
+HTPASSWD_BIN = os.environ.get('STATIONDESK_PUBLISH_HTPASSWD_BIN', 'htpasswd')
+GATED_ENABLED = False
+GATED_DISABLED_REASON = ''
+
+
+def _overlaps(a, b):
+    """True if two directories are the same or one contains the other."""
+    ra, rb = os.path.realpath(a), os.path.realpath(b)
+    return ra == rb or ra.startswith(rb + os.sep) or rb.startswith(ra + os.sep)
+
+
+def _public_check():
+    """(enabled, reason). A non-empty reason is logged once at startup so a
+    half-configured target fails loudly instead of silently doing nothing."""
+    if PUBLIC_MODE == 'local':
+        if not BASE_URL:
+            return False, 'local mode: base_url missing'
+        if not PUBLIC_DIR:
+            return False, 'local mode: public_dir missing'
+        # The whole point of a separate dir: share_dir is the TAILNET-INTERNAL
+        # share (symlinks the owner added for private viewing). Serving it
+        # publicly would publish all of them.
+        if _overlaps(PUBLIC_DIR, ROOT):
+            return False, (f'local mode: public_dir ({PUBLIC_DIR}) overlaps share_dir ({ROOT}) — '
+                           'refusing (that would publish the internal share)')
+        try:
+            os.makedirs(PUBLIC_DIR, exist_ok=True)
+        except OSError as e:
+            return False, f'local mode: cannot create public_dir: {e}'
+        if not os.access(PUBLIC_DIR, os.W_OK):
+            return False, f'local mode: public_dir not writable: {PUBLIC_DIR}'
+        return True, ''
+    missing = [n for n, v in (('ingest_url', INGEST_URL), ('base_url', BASE_URL), (_TOKEN_ENV, TOKEN)) if not v]
+    if not missing:
+        return True, ''
+    # Nothing at all configured = the ordinary local-only install, not a mistake.
+    partial = any((INGEST_URL, BASE_URL, TOKEN))
+    return False, (f'remote mode: missing {", ".join(missing)}' if partial else '')
+
+
+PUBLIC_ENABLED, PUBLIC_DISABLED_REASON = _public_check()
+
+
+def _gated_storage_check():
+    """Return a reason if the optional local gate cannot safely write/read."""
+    if PUBLIC_MODE != 'local':
+        return 'gated publishing is available only in local mode'
+    if _overlaps(GATED_DIR, ROOT) or _overlaps(GATED_DIR, PUBLIC_DIR):
+        return 'gated_dir overlaps an internal or public directory'
+    if any(_overlaps(HTPASSWD_DIR, root) for root in (ROOT, PUBLIC_DIR, GATED_DIR)):
+        return 'htpasswd_dir overlaps a served or internal directory'
+    for path, label, mode in ((GATED_DIR, 'gated_dir', 0o755),
+                              (HTPASSWD_DIR, 'htpasswd_dir', 0o755)):
+        try:
+            os.makedirs(path, mode=mode, exist_ok=True)
+            os.chmod(path, mode)
+        except OSError as exc:
+            return f'cannot create {label}: {exc}'
+        if not os.access(path, os.W_OK):
+            return f'{label} not writable: {path}'
+    return ''
+
+
+if PUBLIC_MODE == 'local':
+    if not shutil.which(HTPASSWD_BIN):
+        GATED_DISABLED_REASON = f'htpasswd unavailable: {HTPASSWD_BIN}'
+    else:
+        GATED_DISABLED_REASON = _gated_storage_check()
+        GATED_ENABLED = not GATED_DISABLED_REASON
+
+
+FUNNEL_PORT = os.environ.get('STATIONDESK_PUBLISH_FUNNEL_PORT', '')
+_funnel_cache = (0.0, None)
+
+
+def funnel_status():
+    """None when this box is not publishing through Tailscale Funnel; otherwise whether
+    Funnel is live on our port. Asked of tailscale itself, so enabling Funnel in the
+    tailnet policy and re-running the install shows up without a restart."""
+    global _funnel_cache
+    if not FUNNEL_PORT:
+        return None
+    if time.time() - _funnel_cache[0] < 10:
+        return _funnel_cache[1]
+    active = False
+    try:
+        r = subprocess.run(['tailscale', 'funnel', 'status', '--json'], capture_output=True,
+                           text=True, timeout=5)
+        allowed = json.loads(r.stdout).get('AllowFunnel') or {} if r.returncode == 0 else {}
+        active = any(on and host.endswith(':' + FUNNEL_PORT) for host, on in allowed.items())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    _funnel_cache = (time.time(), {'port': FUNNEL_PORT, 'active': active,
+                                   'admin_url': 'https://login.tailscale.com/admin/acls'})
+    return _funnel_cache[1]
+
+
+# ---- site identity: name and favicon, set by the owner in state/publish.env ----
+# The app only reads these. Defaults are the product's own label and icon.
+APP_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = os.path.join(os.environ.get('STATIONDESK_ROOT', '/opt/stationdesk'), 'state/publish.env')
+DEFAULT_SITE_NAME = 'Publish'
+FAVICON_MAX_BYTES = 256 * 1024
+_FAVICON_TYPES = {'.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon',
+                  '.gif': 'image/gif', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}
+
+
+def _load_site():
+    """Site name, favicon data URI, and where the favicon came from. A favicon that
+    cannot be read falls back to the product icon and says why in `favicon_error`."""
+    name = os.environ.get('STATIONDESK_PUBLISH_SITE_NAME', '').strip()[:80] or DEFAULT_SITE_NAME
+    configured = os.environ.get('STATIONDESK_PUBLISH_FAVICON', '').strip()
+    path, data, error = None, b'', ''
+    if configured:
+        candidate = Path(os.path.expanduser(configured))
+        if not candidate.is_absolute():
+            candidate = Path(CONFIG_FILE).parent / candidate
+        try:
+            if candidate.suffix.lower() not in _FAVICON_TYPES:
+                raise ValueError('use .svg, .png, .ico, .gif, .jpg or .webp')
+            if candidate.stat().st_size > FAVICON_MAX_BYTES:
+                raise ValueError(f'larger than {FAVICON_MAX_BYTES // 1024} KB')
+            data, path = candidate.read_bytes(), candidate
+        except (OSError, ValueError) as exc:
+            error = f'{configured}: {exc}'
+    source = str(path) if path else ''
+    if not path:
+        path = APP_DIR / 'icon.svg'
+        data = path.read_bytes()
+    uri = 'data:' + _FAVICON_TYPES[path.suffix.lower()] + ';base64,' + base64.b64encode(data).decode('ascii')
+    return {'name': name, 'favicon': uri, 'favicon_source': source,
+            'favicon_error': error, 'custom_name': name != DEFAULT_SITE_NAME}
+
+
+SITE = _load_site()
+
+
+def site_settings():
+    """What the read-only Settings view shows."""
+    if FUNNEL_PORT:
+        destination = 'funnel'
+    elif not PUBLIC_ENABLED:
+        destination = 'none'
+    else:
+        destination = 'local' if PUBLIC_MODE == 'local' else 'remote'
+    return {**SITE, 'config_file': CONFIG_FILE, 'destination': destination,
+            'base_url': BASE_URL if PUBLIC_ENABLED else '', 'share_dir': ROOT}
+
+
+_RE_HEAD_OPEN = re.compile(r'<head(?:\s[^>]*)?>', re.I)
+_RE_HTML_OPEN = re.compile(r'<html(?:\s[^>]*)?>', re.I)
+_RE_COMMENT_SPAN = re.compile(r'<!--.*?(?:-->|\Z)', re.S)
+
+
+class _IconFinder(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.found = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'link' and 'icon' in (dict(attrs).get('rel') or '').lower().split():
+            self.found = True
+
+    handle_startendtag = handle_starttag
+
+
+def with_site_icon(html_bytes):
+    """Give a page that has no icon of its own the site favicon, inline, so the
+    snapshot stays self-contained. A page's own icon is left alone."""
+    text = html_bytes.decode('utf-8', 'replace')
+    finder = _IconFinder()
+    finder.feed(text)
+    if finder.found:
+        return html_bytes
+    tag = f'<link rel="icon" href="{SITE["favicon"]}">'
+    visible = _RE_COMMENT_SPAN.sub(lambda m: ' ' * len(m.group(0)), text)
+    for rx in (_RE_HEAD_OPEN, _RE_HTML_OPEN):
+        m = rx.search(visible)
+        if m:
+            return (text[:m.end()] + tag + text[m.end():]).encode('utf-8')
+    return (tag + text).encode('utf-8')
+
+
+def gated_available():
+    """Can this box publish a gated document right now?
+
+    Local mode gates with this box's nginx, so the answer is about local storage
+    and htpasswd (computed at import). Remote mode does not own the gate at all —
+    the receiver does — so the answer is whatever the receiver says it supports.
+    The old code answered "local only" for both, which was a statement about who
+    wrote the code rather than about what the receiver can do."""
+    if PUBLIC_MODE == 'local':
+        return GATED_ENABLED
+    return bool(PUBLIC_ENABLED and remote_supports('1', 'gated'))
+
+
+def gated_unavailable_reason():
+    if PUBLIC_MODE == 'local':
+        return GATED_DISABLED_REASON or 'htpasswd unavailable'
+    if not PUBLIC_ENABLED:
+        return PUBLIC_DISABLED_REASON or 'external publishing is not configured'
+    c = remote_contract()
+    if not c:
+        return 'the receiver did not answer /health, so its contract is unknown'
+    return ('the receiver does not offer gated publishing '
+            f'(versions={c.get("versions")}, modes={c.get("modes")})')
+
+
+_TITLE_CACHE = {}   # path -> ((mtime_ns, size), title); replaced wholesale by each list_items()
+
+
+def list_items():
+    """One level of the share dir (no recursion)."""
+    items = []
+    seen = {}   # titles of this listing; becomes the cache, so removed files drop out
+    if not os.path.isdir(ROOT):
+        return items
+    for name in sorted(os.listdir(ROOT)):
+        if name.startswith('.'):
+            continue
+        full = os.path.join(ROOT, name)
+        try:
+            lstat = os.lstat(full)
+        except OSError:
+            continue
+        is_link = os.path.islink(full)
+        is_dir = os.path.isdir(full)
+        is_broken = is_link and not os.path.exists(full)   # dangling symlink (target gone)
+        if is_link and not is_broken:
+            lstat = os.stat(full)   # a live link changes when its target is edited, not the link
+        target = None
+        if is_link:
+            try:
+                raw = os.readlink(full)
+                target = raw.replace(HOME, '~') if raw.startswith(HOME) else raw
+            except OSError:
+                target = '(broken link)'
+        if name.endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp')):
+            ftype = 'image'
+        elif name.endswith('.html'):
+            ftype = 'html'
+        elif is_dir:
+            ftype = 'dir'
+        else:
+            ftype = 'file'
+        title = ''
+        if ftype == 'html' and not is_broken:
+            key = (lstat.st_mtime_ns, lstat.st_size)   # lstat is the link target's stat for live links
+            hit = _TITLE_CACHE.get(full)
+            if hit and hit[0] == key:
+                title = hit[1]
+                seen[full] = hit
+            else:
+                read = doc_title(full)
+                title = read or ''
+                if read is not None:   # an unreadable file is retried next time (chmod keeps mtime and size)
+                    seen[full] = (key, title)
+        target_dir = ''
+        if target:
+            target_dir = os.path.dirname(target) or '/'
+        elif not is_link:
+            target_dir = '(direct file)'
+        items.append({
+            'name': name,
+            'type': ftype,
+            'target': target,
+            'target_dir': target_dir,
+            'isLink': is_link,
+            'isDir': is_dir,
+            'isBroken': is_broken,
+            'size': format_size(lstat.st_size, is_dir),
+            'mtime': datetime.fromtimestamp(lstat.st_mtime).strftime('%Y-%m-%d %H:%M'),
+            'mtime_epoch': int(lstat.st_mtime),
+            'title': title,
+        })
+    _TITLE_CACHE.clear()
+    _TITLE_CACHE.update(seen)
+    views = ingest_views()
+    for item in items:
+        if item['name'] in views:
+            item['views'] = views[item['name']]['views']
+            item['last_view'] = views[item['name']]['last_view']
+    return items
+
+
+# ---- document view counts ----
+# nginx (:8000) appends one tab-separated line per document request to VIEWS_LOG
+# (time, request uri, status, user agent). Counting here instead of reading the
+# system access log keeps the numbers past its 14-day rotation and free of agent traffic.
+VIEWS_LOG = os.path.join(STATE_DIR, 'views.log')
+VIEWS_FILE = os.path.join(STATE_DIR, 'views.json')   # {"docs": {name: {views, last_view}}, "log": {inode, offset}}
+VIEWS_LOG_TRIM = 1024 * 1024    # a fully read log bigger than this is emptied
+_views_lock = threading.Lock()
+_NOT_A_BROWSER = re.compile(r'headlesschrome|bot|crawl|spider|preview|facebookexternalhit', re.I)
+
+
+def _views_load():
+    try:
+        with open(VIEWS_FILE, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if not isinstance(data.get('docs'), dict):
+        data['docs'] = {}
+    if not isinstance(data.get('log'), dict):
+        data['log'] = {'inode': 0, 'offset': 0}
+    return data
+
+
+def _views_save(data):
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    tmp = f'{VIEWS_FILE}.tmp-{secrets.token_hex(4)}'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh)
+    os.replace(tmp, VIEWS_FILE)
+
+
+def view_name(uri):
+    """Request uri -> the share entry it is a document view of, or None.
+    A file counts only as itself; inside a shared folder only its pages (.html or a
+    folder index) count, so a page's css and images are not views."""
+    path = urllib.parse.unquote(urllib.parse.urlsplit(uri).path)
+    parts = [p for p in path.split('/') if p]
+    if not parts or parts[0].startswith('.') or parts[0] == '_assets' or '..' in parts:
+        return None
+    full = os.path.join(ROOT, parts[0])
+    if not os.path.exists(full):
+        return None
+    if os.path.isdir(full):
+        page = path.endswith('/') or parts[-1].lower().endswith(('.html', '.htm'))
+    else:
+        page = len(parts) == 1 and not path.endswith('/')
+    return parts[0] if page else None
+
+
+def counted_view(line):
+    """One log line -> (name, epoch) when it is a browser's successful document request."""
+    fields = line.rstrip('\r\n').split('\t')
+    if len(fields) != 4:
+        return None
+    when, uri, status, agent = fields
+    if status not in ('200', '304') or not agent.startswith('Mozilla/') or _NOT_A_BROWSER.search(agent):
+        return None
+    name = view_name(uri)
+    if name is None:
+        return None
+    try:
+        epoch = int(datetime.fromisoformat(when).timestamp())
+    except ValueError:
+        epoch = int(time.time())
+    return name, epoch
+
+
+def ingest_views():
+    """Count the log lines written since the last call. The cursor is (inode, offset): a
+    replaced file or a shorter one starts over from 0. Returns the stored counters."""
+    with _views_lock:
+        data = _views_load()
+        log = data['log']
+        try:
+            with open(VIEWS_LOG, 'rb') as fh:
+                stat = os.fstat(fh.fileno())
+                offset = log.get('offset', 0) if log.get('inode') == stat.st_ino else 0
+                if offset > stat.st_size:
+                    offset = 0
+                fh.seek(offset)
+                chunk = fh.read()
+        except OSError:
+            return data['docs']
+        chunk = chunk[:chunk.rfind(b'\n') + 1]     # a half-written last line waits for the next call
+        for raw in chunk.decode('utf-8', 'replace').splitlines():
+            hit = counted_view(raw)
+            if hit:
+                entry = data['docs'].setdefault(hit[0], {'views': 0, 'last_view': 0})
+                entry['views'] += 1
+                entry['last_view'] = max(entry['last_view'], hit[1])
+        offset += len(chunk)
+        if offset >= VIEWS_LOG_TRIM and os.stat(VIEWS_LOG).st_size == offset:
+            os.truncate(VIEWS_LOG, 0)               # nginx appends, so it keeps writing at the new end
+            offset = 0
+        cursor = {'inode': stat.st_ino, 'offset': offset}
+        if chunk or cursor != log:
+            data['log'] = cursor
+            _views_save(data)
+        return data['docs']
+
+
+def drop_views(name):
+    """Unpublishing resets the counter, so a later file under the same name starts at 0."""
+    with _views_lock:
+        data = _views_load()
+        if data['docs'].pop(name, None) is not None:
+            _views_save(data)
+
+
+def format_size(size, is_dir):
+    if is_dir:
+        return 'dir'
+    if size < 1024:
+        return f'{size} B'
+    if size < 1024 * 1024:
+        return f'{size // 1024} KB'
+    return f'{size / (1024*1024):.1f} MB'
+
+
+def safe_resolve(name):
+    """name -> absolute path inside ROOT. Blocks path traversal. Lexical (does
+    not follow the symlink itself)."""
+    if (not isinstance(name, str) or name in ('', '.', '..', '_assets')
+            or '/' in name or '\\' in name):
+        return None
+    real_root = os.path.realpath(ROOT)
+    lexical = os.path.normpath(os.path.join(ROOT, name))
+    if not lexical.startswith(real_root + os.sep) and lexical != real_root:
+        return None
+    return lexical
+
+
+def unpublish(name):
+    """Unlink a symlink (original preserved). Refuses direct files."""
+    path = safe_resolve(name)
+    if not path or not os.path.lexists(path):
+        return False, f'not found: {name}'
+    if not os.path.islink(path):
+        return False, 'not a symlink — use unpublish-direct with confirm_name'
+    try:
+        os.unlink(path)
+        drop_views(name)
+        return True, f'unlinked: {name}'
+    except OSError as e:
+        return False, str(e)
+
+
+def unpublish_direct(name, confirm_name):
+    """Delete a direct (non-symlink) file — only when the name is retyped."""
+    if name != confirm_name:
+        return False, 'confirm_name mismatch'
+    path = safe_resolve(name)
+    if not path or not os.path.lexists(path):
+        return False, f'not found: {name}'
+    if os.path.islink(path):
+        return False, 'is symlink — use plain unpublish'
+    if os.path.isdir(path):
+        return False, 'is directory — refusing rm -rf'
+    try:
+        os.unlink(path)
+        drop_views(name)
+        return True, f'deleted (direct): {name}'
+    except OSError as e:
+        return False, str(e)
+
+
+def unpublish_batch(names, include_direct=False):
+    """symlink -> unlink; direct file -> delete only if include_direct; real
+    directory -> refused (no rm -rf). Returns a per-item result list."""
+    results = []
+    seen = set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        path = safe_resolve(name)
+        if not path or not os.path.lexists(path):
+            results.append({'name': name, 'ok': False, 'kind': 'missing', 'message': f'not found: {name}'})
+            continue
+        if os.path.islink(path):
+            ok, msg = unpublish(name)
+            results.append({'name': name, 'ok': ok, 'kind': 'symlink', 'message': msg})
+        elif os.path.isdir(path):
+            results.append({'name': name, 'ok': False, 'kind': 'dir', 'message': 'directory — refused'})
+        elif include_direct:
+            ok, msg = unpublish_direct(name, name)
+            results.append({'name': name, 'ok': ok, 'kind': 'direct', 'message': msg})
+        else:
+            results.append({'name': name, 'ok': False, 'kind': 'direct-skipped', 'message': 'direct file skipped (include_direct=false)'})
+    return results
+
+
+# ---- broken-symlink repair / cleanup ----
+def _wt_to_main_candidates(target):
+    """If a broken target points inside a git worktree, propose the main-repo path."""
+    candidates = []
+    m = re.match(r'^(.*?)-wt/[^/]+/(.+)\Z', target)      # ~/x/repo-wt/<slug>/rest -> ~/x/repo/rest
+    if m:
+        candidates.append(f'{m.group(1)}/{m.group(2)}')
+    m = re.match(r'^(.+?)/wt/[^/]+/(.+)\Z', target)       # ~/x/repo/wt/<slug>/rest -> ~/x/repo/rest
+    if m:
+        candidates.append(f'{m.group(1)}/{m.group(2)}')
+    seen = set()
+    return [c for c in candidates if c not in seen and not seen.add(c)]
+
+
+def analyze_broken(name):
+    path = safe_resolve(name)
+    if not path or not os.path.islink(path):
+        return None
+    try:
+        target = os.readlink(path)
+    except OSError:
+        return {'name': name, 'action': 'unlink', 'reason': 'broken readlink', 'old_target': None, 'new_target': None}
+    if os.path.exists(target):
+        return None
+    expanded = target if target.startswith('/') else os.path.realpath(os.path.join(os.path.dirname(path), target))
+    new_target = next((c for c in _wt_to_main_candidates(expanded) if os.path.exists(c)), None)
+    return {
+        'name': name,
+        'action': 'repair' if new_target else 'unlink',
+        'reason': 'worktree->main repair' if new_target else 'target not found in any repair candidate',
+        'old_target': target,
+        'new_target': new_target,
+    }
+
+
+def repair_or_cleanup_all():
+    if not os.path.isdir(ROOT):
+        return []
+    results = []
+    for name in sorted(os.listdir(ROOT)):
+        if name.startswith('.'):
+            continue
+        full = os.path.join(ROOT, name)
+        if not os.path.islink(full) or os.path.exists(full):
+            continue
+        info = analyze_broken(name)
+        if not info:
+            continue
+        try:
+            os.unlink(full)
+            if info['action'] == 'repair' and info['new_target']:
+                os.symlink(info['new_target'], full)
+            results.append({**info, 'ok': True})
+        except OSError as e:
+            results.append({**info, 'ok': False, 'error': str(e)})
+    return results
+
+
+# ==== external publish: self-contained snapshot + ingest push (pluggable) ====
+
+_RE_CSS = re.compile(r'<link\b[^>]*\brel=["\']?stylesheet["\']?[^>]*>', re.I)
+_RE_HREF = re.compile(r'\bhref=["\']([^"\']+)["\']', re.I)
+_RE_JS = re.compile(r'<script\b([^>]*)\bsrc=["\']([^"\']+)["\']([^>]*)>\s*</script>', re.I)
+_RE_IMG = re.compile(r'(<img\b[^>]*\bsrc=)["\']([^"\']+)["\']', re.I)
+_RE_TITLE = re.compile(r'<title>([^<]*)</title>', re.I)
+_TITLE_SCAN_CHARS = 262_144
+_RE_SCHEME = re.compile(r'^[a-z]+:', re.I)
+# Non-greedy so each comment ends at its own '-->'. Unterminated comments run to
+# end of document, which is also how browsers treat them.
+_RE_COMMENT = re.compile(r'<!--.*?(?:-->|\Z)', re.S)
+
+
+class _HeadTitleParser(HTMLParser):
+    """Extract a real title element before body, ignoring comments/scripts."""
+
+    _VOID_ELEMENTS = frozenset({
+        'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link',
+        'meta', 'param', 'source', 'track', 'wbr',
+    })
+    _HEAD_ELEMENTS = frozenset({
+        'base', 'basefont', 'bgsound', 'link', 'meta', 'noframes', 'script',
+        'style', 'template', 'title',
+    })
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.in_head = False
+        self.prologue_open = True
+        self.in_title = False
+        self.stack = []
+        self.parts = []
+        self.title = None
+
+    def handle_starttag(self, tag, _attrs):
+        tag = tag.lower()
+        if tag == 'head' and self.prologue_open:
+            self.in_head = True
+        elif tag == 'body':
+            self.prologue_open = False
+            self.in_head = False
+            self.in_title = False
+        elif (tag == 'title' and self.prologue_open and self.title is None
+              and (self.stack in ([], ['html'])
+                   or (self.in_head and self.stack[-1:] == ['head']))):
+            self.in_title = True
+            self.parts = []
+        elif tag == 'html' and not self.stack:
+            pass
+        elif (self.prologue_open and tag in self._HEAD_ELEMENTS
+              and (self.stack in ([], ['html'])
+                   or (self.in_head and self.stack[-1:] == ['head']))):
+            # HTML permits the head start/end tags to be omitted. Treat a
+            # top-level head element as opening that implicit head so metadata
+            # such as <meta>, <link>, <base>, or <script> can precede <title>.
+            self.in_head = True
+        else:
+            self.prologue_open = False
+            self.in_title = False
+        if tag not in self._VOID_ELEMENTS:
+            self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag == 'title' and self.in_title:
+            self.title = ''.join(self.parts).strip()
+            self.in_title = False
+        elif tag == 'head':
+            self.in_head = False
+            self.prologue_open = False
+        if tag in self.stack:
+            del self.stack[len(self.stack) - 1 - self.stack[::-1].index(tag):]
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.parts.append(data)
+        elif data.strip() and not self.in_head:
+            self.prologue_open = False
+
+
+def _head_title(html):
+    parser = _HeadTitleParser()
+    parser.feed(html)
+    parser.close()
+    return parser.title
+
+
+def doc_title(path):
+    """The document's <title> from a bounded prefix; '' when it has none (the list falls back to
+    the file name), None when the file could not be read."""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+            return _head_title(fh.read(_TITLE_SCAN_CHARS)) or ''
+    except (OSError, ValueError):
+        return None
+
+
+def read_title_meta(name):
+    """Read one explicitly named share entry without offering enumeration.
+
+    ``safe_resolve`` is deliberately lexical: documents in the share directory
+    are commonly symlinks to their authoring location.  The security boundary is
+    the flat basename selected inside ROOT, not the symlink target; accepting a
+    slash or dot-prefixed entry would instead create a second path namespace.
+    """
+    if (not name or os.path.basename(name) != name or safe_resolve(name) is None
+            or not name.lower().endswith('.html')):
+        return 400, {'ok': False, 'error': 'name must be an HTML basename'}
+    path = safe_resolve(name)
+    try:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(name)
+        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+            # A tailnet-wide metadata lookup must not allocate the entire shared
+            # document.  Titles belong in <head>; a bounded prefix keeps one
+            # pathological file from amplifying memory per request.
+            html = fh.read(_TITLE_SCAN_CHARS)
+            mtime = int(os.fstat(fh.fileno()).st_mtime)
+    except (OSError, ValueError):
+        return 404, {'ok': False, 'error': 'not found'}
+    title = _head_title(html) or name
+    return 200, {'name': name, 'title': title, 'mtime': mtime}
+
+
+def _resolve_share_file(ref, base_dir):
+    """Resolve assets using the same /_assets/ alias as the document nginx."""
+    ref = ref.split('#', 1)[0].split('?', 1)[0]
+    if not ref or _RE_SCHEME.match(ref) or ref.startswith('//'):
+        return None, 'external'
+    assets = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'share-docs', 'assets')
+    root = assets if ref.startswith('/_assets/') else ROOT
+    if ref.startswith('/_assets/'):
+        cand = os.path.join(assets, ref[len('/_assets/'):])
+        if not os.path.exists(cand):  # same fallback as nginx: the share's own _assets/
+            root, cand = ROOT, os.path.join(ROOT, ref.lstrip('/'))
+    else:
+        cand = os.path.join(ROOT, ref.lstrip('/')) if ref.startswith('/') else os.path.join(base_dir, ref)
+        if not ref.startswith('/') and Path(base_dir).resolve().is_relative_to(Path(assets).resolve()):
+            root = assets
+    real = os.path.realpath(cand)
+    if not (real == os.path.realpath(root) or real.startswith(os.path.realpath(root) + os.sep)):
+        return None, 'outside share dir'
+    return real, None
+
+
+def _read_share_file(ref, base_dir):
+    """Read a local document asset, including the built-in nginx asset alias."""
+    real, err = _resolve_share_file(ref, base_dir)
+    if err:
+        return None, err
+    try:
+        with open(real, 'rb') as fh:
+            return fh.read(), None
+    except OSError as e:
+        return None, str(e)
+
+
+def _guess_ctype(path):
+    ext = os.path.splitext(path)[1].lower()
+    return {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif', '.svg': 'image/svg+xml', '.webp': 'image/webp'}.get(ext, 'image/png')
+
+
+def _sub_outside_comments(rx, repl, html):
+    """Apply rx.sub(repl, ...) to everything EXCEPT HTML comment regions.
+
+    An author who comments a reference out has said "do not publish this". A plain
+    regex pass over the whole document does not hear that: `<!-- <img
+    src="/secret.png"> -->` gets read off disk and written back as a base64 data
+    URI, so the bytes ship inside the public page while the page still looks like
+    it has nothing there. Comments are skipped verbatim instead."""
+    out, pos = [], 0
+    for m in _RE_COMMENT.finditer(html):
+        out.append(rx.sub(repl, html[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(rx.sub(repl, html[pos:]))
+    return ''.join(out)
+
+
+def bundle_single_file(name):
+    """Inline a published HTML page's local css/js/img into ONE self-contained
+    file (read from disk — gate-safe, no HTTP self-fetch). External refs stay.
+    Returns (title, html_bytes, warnings).
+
+    `warnings` names every LOCAL asset that could not be inlined. Those used to be
+    dropped: the tag was left pointing at a path that exists only on this box, so
+    the published page came out referencing an asset the public host has never
+    heard of and rendered unstyled — with nothing logged, nothing returned, and no
+    way for the operator to tell a plain page from a broken one. Refs that are
+    external on purpose (http(s), protocol-relative) are not warnings."""
+    path = safe_resolve(name)
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(name)
+    base_dir = os.path.dirname(path)
+    with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+        html = fh.read()
+    warnings = []
+
+    def _note(kind, ref, err):
+        # 'external' is the intended case, not a failure: those refs are meant to
+        # stay as links. Everything else means the reader could not produce bytes.
+        if err and err != 'external':
+            warnings.append(f'{kind} not inlined ({err}): {ref}')
+
+    def _css(m):
+        hm = _RE_HREF.search(m.group(0))
+        if not hm:
+            return m.group(0)
+        data, err = _read_share_file(hm.group(1), base_dir)
+        if data is None:
+            _note('stylesheet', hm.group(1), err)
+            return m.group(0)
+        css = data.decode('utf-8', 'replace').replace('</style', '<\\/style')
+        return '<style>\n' + css + '\n</style>'
+
+    def _js(m):
+        pre, ref, post = m.group(1), m.group(2), m.group(3)
+        data, err = _read_share_file(ref, base_dir)
+        if data is None:
+            _note('script', ref, err)
+            return m.group(0)
+        typ = ' type="module"' if 'module' in (pre + post) else ''
+        js = data.decode('utf-8', 'replace').replace('</script', '<\\/script')
+        return '<script' + typ + '>\n' + js + '\n</script>'
+
+    def _img(m):
+        pre, ref = m.group(1), m.group(2)
+        data, err = _read_share_file(ref, base_dir)
+        if data is None:
+            _note('image', ref, err)
+            return m.group(0)
+        b = os.path.join(base_dir, ref) if not ref.startswith('/') else os.path.join(ROOT, ref.lstrip('/'))
+        return pre + '"data:' + _guess_ctype(b) + ';base64,' + base64.b64encode(data).decode('ascii') + '"'
+
+    html = _sub_outside_comments(_RE_JS, _js, html)
+    html = _sub_outside_comments(_RE_IMG, _img, html)
+    # CSS documentation can contain example <script src=...> tags. Insert it
+    # after scanning HTML assets so those examples are not treated as page tags.
+    html = _sub_outside_comments(_RE_CSS, _css, html)
+    tm = _RE_TITLE.search(html)
+    return (tm.group(1).strip() if tm else name), html.encode('utf-8'), warnings
+
+
+class BundleValidationError(RuntimeError):
+    pass
+
+
+def _first_href_span(start_tag):
+    """Locate the browser-first href value without reserializing its tag."""
+    size, i = len(start_tag), 1
+    while i < size and start_tag[i].isspace():
+        i += 1
+    while i < size and not start_tag[i].isspace() and start_tag[i] not in '/>':
+        i += 1
+    while i < size:
+        while i < size and start_tag[i].isspace():
+            i += 1
+        if i >= size or start_tag[i] == '>' or (start_tag[i] == '/' and i + 1 < size and start_tag[i + 1] == '>'):
+            return None
+        name_start = i
+        while i < size and not start_tag[i].isspace() and start_tag[i] not in '=/>':
+            i += 1
+        if name_start == i:
+            i += 1
+            continue
+        attr_name = start_tag[name_start:i].lower()
+        while i < size and start_tag[i].isspace():
+            i += 1
+        if i >= size or start_tag[i] != '=':
+            continue
+        i += 1
+        while i < size and start_tag[i].isspace():
+            i += 1
+        if i >= size:
+            return None
+        quote = start_tag[i] if start_tag[i] in ('"', "'") else ''
+        value_start = i + 1 if quote else i
+        value_end = start_tag.find(quote, value_start) if quote else value_start
+        if quote and value_end < 0:
+            return None
+        if not quote:
+            while value_end < size and not start_tag[value_end].isspace() and start_tag[value_end] != '>':
+                if start_tag[value_end:value_end + 2] == '/>':
+                    break
+                value_end += 1
+        i = value_end + 1 if quote else value_end
+        if attr_name == 'href':
+            return value_start, value_end, start_tag[value_start:value_end], quote
+    return None
+
+
+class _AnchorParser(HTMLParser):
+    """Collect browser-active, first-href anchor positions without reformatting HTML."""
+
+    def __init__(self, source):
+        super().__init__(convert_charrefs=False)
+        self.source = source
+        self.line_starts = [0] + [match.end() for match in re.finditer(r'\n', source)]
+        self.anchors = []
+        self.inert = []
+
+    def _anchor(self):
+        span = _first_href_span(self.get_starttag_text())
+        if span is None:
+            return None
+        line, column = self.getpos()
+        start = self.line_starts[line - 1] + column
+        value_start, value_end, ref, quote = span
+        return {'start': start + value_start, 'end': start + value_end,
+                'ref': ref, 'quote': quote}
+
+    def _collect_anchor(self, tag):
+        if self.inert or tag != 'a':
+            return
+        anchor = self._anchor()
+        if anchor is not None:
+            self.anchors.append(anchor)
+
+    def handle_starttag(self, tag, _attrs):
+        tag = tag.lower()
+        if tag in ('script', 'style', 'template', 'noscript'):
+            self.inert.append(tag)
+            return
+        self._collect_anchor(tag)
+
+    def handle_startendtag(self, tag, _attrs):
+        tag = tag.lower()
+        if tag in ('script', 'style', 'template', 'noscript'):
+            # HTML browsers ignore the slash on non-void elements, so inert content stays inert.
+            self.inert.append(tag)
+            return
+        # Non-inert self-closing tags keep the existing anchor collection behavior.
+        self._collect_anchor(tag)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if self.inert and self.inert[-1] == tag:
+            self.inert.pop()
+
+
+def _bundle_target(ref, current):
+    """Return (safe target, unsupported target) for a document anchor."""
+    ref = html_unescape(ref or '')
+    if not ref or ref.startswith('#') or _RE_SCHEME.match(ref) or ref.startswith('//'):
+        return None, None
+    path = urllib.parse.unquote(urllib.parse.urlsplit(
+        urllib.parse.urljoin('/' + current, ref)).path).lstrip('/')
+    if not path.lower().endswith(('.html', '.htm')):
+        return None, None
+    if safe_resolve(path):
+        return path, None
+    return None, path
+
+
+def _bundle_anchors(html, current):
+    parser = _AnchorParser(html)
+    parser.feed(html)
+    parser.close()
+    targets, unsupported = [], []
+    for anchor in parser.anchors:
+        target, unsupported_target = _bundle_target(anchor['ref'], current)
+        if target:
+            targets.append(target)
+        elif unsupported_target:
+            unsupported.append(unsupported_target)
+    return targets, list(dict.fromkeys(unsupported))
+
+
+def _rewrite_bundle_anchors(html, current, link_map):
+    """Rewrite selected internal document links and report selected-out links."""
+    parser = _AnchorParser(html)
+    parser.feed(html)
+    parser.close()
+    warnings, unsupported, replacements = [], [], []
+    for anchor in parser.anchors:
+        target, unsupported_target = _bundle_target(anchor['ref'], current)
+        if unsupported_target:
+            unsupported.append(unsupported_target)
+            continue
+        if not target:
+            continue
+        if target not in link_map:
+            warnings.append(target)
+            continue
+        parsed = urllib.parse.urlsplit(html_unescape(anchor['ref']))
+        suffix = (('?' + parsed.query) if parsed.query else '') + (('#' + parsed.fragment) if parsed.fragment else '')
+        replacements.append((anchor['start'], anchor['end'], link_map[target] + suffix))
+
+    for start, end, replacement in reversed(replacements):
+        html = html[:start] + replacement + html[end:]
+    return html, list(dict.fromkeys(warnings)), list(dict.fromkeys(unsupported))
+
+
+def _register_bundle_plan(owner, entry, candidates):
+    now = time.time()
+    with _BUNDLE_PLANS_LOCK:
+        for plan_id, record in list(_BUNDLE_PLANS.items()):
+            if record['expires_at'] <= now:
+                del _BUNDLE_PLANS[plan_id]
+        while len(_BUNDLE_PLANS) >= MAX_BUNDLE_PLANS:
+            oldest = min(_BUNDLE_PLANS, key=lambda key: _BUNDLE_PLANS[key]['expires_at'])
+            del _BUNDLE_PLANS[oldest]
+        plan_id = secrets.token_urlsafe(24)
+        expires_at = int(now + BUNDLE_PLAN_TTL_S)
+        _BUNDLE_PLANS[plan_id] = {'owner': owner, 'entry': entry,
+                                  'candidates': candidates, 'expires_at': expires_at}
+    return plan_id, expires_at
+
+
+def _consume_bundle_plan(plan_id, owner, entry, docs):
+    if not isinstance(plan_id, str) or not plan_id:
+        return False, 'bundle plan missing'
+    names = list(dict.fromkeys(docs))
+    now = time.time()
+    with _BUNDLE_PLANS_LOCK:
+        record = _BUNDLE_PLANS.get(plan_id)
+        if not record:
+            return False, 'bundle plan missing or already used'
+        if record['expires_at'] <= now:
+            del _BUNDLE_PLANS[plan_id]
+            return False, 'bundle plan expired'
+        if record['owner'] != owner:
+            return False, 'bundle plan owner mismatch'
+        if record['entry'] != entry:
+            return False, 'bundle plan entry mismatch'
+        if entry not in names:
+            return False, 'bundle plan must include its entry document'
+        unknown = [name for name in names if name not in record['candidates']]
+        if unknown:
+            return False, 'bundle plan contains unapproved documents: ' + ', '.join(unknown)
+        # Delete while holding the lock. A failed build still consumes approval.
+        del _BUNDLE_PLANS[plan_id]
+        return True, record
+
+
+def plan_bundle(entry, max_docs=MAX_BUNDLE_DOCS, owner=''):
+    """Read-only BFS proposal of locally linked HTML documents."""
+    # A read-only walk of this box's share dir. It proposes members; it publishes
+    # nothing. That is true in either mode — the old refusal read "remote ingest has
+    # no such contract", but the contract it needed is the receiver's v1 files map,
+    # and planning does not touch the receiver at all.
+    if PUBLIC_MODE != 'local' and not remote_supports('1'):
+        c = remote_contract()
+        return False, ('bundle planning needs a receiver that speaks contract v1: '
+                       + (gated_unavailable_reason() if not (PUBLIC_ENABLED and c)
+                          else f'receiver offers versions={c.get("versions") or []}'))
+    try:
+        max_docs = int(max_docs or MAX_BUNDLE_DOCS)
+    except (TypeError, ValueError):
+        return False, 'max_docs must be an integer'
+    max_docs = max(1, min(max_docs, MAX_BUNDLE_DOCS))
+    if not entry.lower().endswith(('.html', '.htm')):
+        return False, 'only HTML pages can be bundled'
+    if not safe_resolve(entry) or not os.path.isfile(safe_resolve(entry)):
+        return False, f'not found: {entry}'
+
+    found, missing, failed, unsupported = [entry], [], [], []
+    seen, queue, truncated = {entry}, [entry], False
+    while queue:
+        current = queue.pop(0)
+        try:
+            with open(safe_resolve(current), encoding='utf-8', errors='replace') as fh:
+                targets, current_unsupported = _bundle_anchors(fh.read(), current)
+        except OSError as exc:
+            failed.append(f'{current} ({exc})')
+            continue
+        unsupported.extend(current_unsupported)
+        for target in targets:
+            if target in seen:
+                continue
+            seen.add(target)
+            target_path = safe_resolve(target)
+            if not target_path or not os.path.isfile(target_path):
+                missing.append(target)
+                continue
+            if len(found) >= max_docs:
+                truncated = True
+                continue
+            found.append(target)
+            queue.append(target)
+    try:
+        _title, _files, _warnings, integrity = build_bundle_files(entry, found, include_integrity=True)
+    except Exception as exc:
+        return False, f'bundle plan build failed: {exc}'
+    candidates = {name: {'digest': integrity[name]['digest']} for name in found}
+    plan_id, expires = _register_bundle_plan(owner, entry, candidates)
+    return True, {'plan_id': plan_id, 'plan_expires': expires, 'entry': entry,
+                  'docs': [{'name': name, 'title': integrity[name]['title'],
+                            'digest': integrity[name]['digest'],
+                            'member': 'index.html' if name == entry else name,
+                            'entry': name == entry} for name in found],
+                  'count': len(found), 'missing': list(dict.fromkeys(missing)),
+                  'fetch_failed': failed, 'truncated': truncated, 'max_docs': max_docs,
+                  'unsupported': list(dict.fromkeys(unsupported)), 'warnings': _warnings}
+
+
+def build_bundle_files(entry, docs, include_integrity=False):
+    """Build approved documents into a slug-local files map from disk."""
+    names = list(dict.fromkeys([entry] + [doc for doc in docs if doc != entry]))
+    if len(names) > MAX_BUNDLE_DOCS:
+        raise BundleValidationError(f'bundle document limit exceeded: {len(names)} > {MAX_BUNDLE_DOCS}')
+    for name in names:
+        if not isinstance(name, str) or not name.lower().endswith(('.html', '.htm')):
+            raise BundleValidationError(f'not an HTML document: {name}')
+        if not safe_resolve(name) or not os.path.isfile(safe_resolve(name)):
+            raise BundleValidationError(f'not found: {name}')
+    link_map = {name: ('./' if name == entry else name) for name in names}
+    files, warnings, integrity, total = {}, [], {}, 0
+    entry_title = entry
+    for name in names:
+        # Hash the exact artifact that is about to be written; a second read only creates a race.
+        title, html_bytes, asset_warnings = bundle_single_file(name)
+        warnings.extend(f'{name}: {w}' for w in asset_warnings)
+        digest = hashlib.sha256(html_bytes).hexdigest()
+        html, dangling, unsupported = _rewrite_bundle_anchors(
+            html_bytes.decode('utf-8', 'replace'), name, link_map)
+        data = html.encode('utf-8')
+        member = 'index.html' if name == entry else name
+        if member in files:
+            raise BundleValidationError(
+                f'bundle member name collides with the entry page: {member}')
+        files[member] = data
+        total += len(data)
+        integrity[name] = {'title': title, 'digest': digest}
+        warnings.extend(f'{name}: link outside bundle: {target}' for target in dangling)
+        warnings.extend(f'{name}: unsupported subdirectory link: {target}' for target in unsupported)
+        if name == entry:
+            entry_title = title
+    limit = LOCAL_MAX_BYTES if PUBLIC_MODE == 'local' else MAX_BUNDLE_TOTAL_BYTES
+    if total > limit:
+        raise BundleValidationError(f'bundle total size exceeds limit: {total} > {limit}')
+    if include_integrity:
+        return entry_title, files, warnings, integrity
+    return entry_title, files, warnings
+
+
+def _slugify(title, name):
+    def s(x):
+        return re.sub(r'[^a-z0-9]+', '-', (x or '').lower()).strip('-')[:32].strip('-')
+    fbase = s(re.sub(r'\.html?\Z', '', name.lower()))
+    tbase = s(title)
+    base = fbase if len(fbase) >= 4 else (tbase if len(tbase) >= 4 else (fbase or tbase or 'doc'))
+    return f'{base}-{secrets.token_hex(3)}'
+
+
+# The receiver decides which contract it speaks; we ask it rather than assume.
+# Cached for the process: this is a capability, not a reading, and a publish that
+# re-asked on every call would turn one outage into two.
+_REMOTE_CONTRACT = None
+
+
+def remote_contract():
+    """{'versions': [...], 'modes': [...]} from the receiver, or {} if unknown.
+
+    Fail-safe, not fail-closed: an unreachable receiver yields {} and the caller
+    falls back to v0/open, which is what every deployed publisher did before v1
+    existed. Refusing to publish because a health probe failed would take away a
+    capability the box already had."""
+    global _REMOTE_CONTRACT
+    if _REMOTE_CONTRACT is None:
+        try:
+            h = _ingest('GET', '/health', timeout=5)
+            c = (h or {}).get('public_contract') or {}
+            _REMOTE_CONTRACT = {'versions': [str(v) for v in (c.get('supported_versions') or [])],
+                                'modes': list(c.get('modes') or [])}
+        except Exception:
+            _REMOTE_CONTRACT = {}
+    return _REMOTE_CONTRACT
+
+
+def remote_supports(version='1', mode=None):
+    c = remote_contract()
+    if version not in (c.get('versions') or []):
+        return False
+    return mode is None or mode in (c.get('modes') or [])
+
+
+def owner_shape_problem(owner):
+    """Why this owner is not publishable, or ''.
+
+    The receiver enforces its own identity rule and is the authority; this only
+    catches the shape that made documents unrecoverable before — a bare username,
+    which lands in the public console with no identity to look it up by. Checked
+    here so the payload never leaves rather than being explained after a round
+    trip, and kept to the shape so a differently-configured receiver is not
+    second-guessed on its own domain rule."""
+    o = (owner or '').strip()
+    if not o:
+        return 'owner is required'
+    if '@' not in o or o.startswith('@') or o.endswith('@') or ' ' in o:
+        return (f'owner must be a full identity (name@domain), not {o!r} — '
+                'bare usernames cannot be looked up or revoked in the publish console')
+    return ''
+
+
+def _ingest_error(res):
+    """Render the receiver's error. v1 answers with {'code','message'}; v0 with a
+    string. Formatting the dict with str() would print a Python literal at the
+    operator, so the two shapes are told apart here rather than at each call site."""
+    err = (res or {}).get('error', 'ingest error')
+    if isinstance(err, dict):
+        code, msg = err.get('code', ''), err.get('message', '')
+        return f'{msg} [{code}]' if code and msg else (msg or code or 'ingest error')
+    return err if isinstance(err, str) else 'ingest error'
+
+
+def _ingest(method, ep, body=None, timeout=20):
+    data = json.dumps(body).encode('utf-8') if body is not None else None
+    req = urllib.request.Request(
+        INGEST_URL + ep, data=data, method=method,
+        headers={'Content-Type': 'application/json', TOKEN_HEADER: TOKEN})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode('utf-8'))
+    except urllib.error.HTTPError as exc:
+        # HTTPError is also a response.  Throwing its body away reduced every
+        # receiver failure to e.g. "HTTP Error 500", which made a storage
+        # failure indistinguishable from an auth failure and led operators to
+        # rotate a healthy token.  Keep only the receiver's bounded structured
+        # error; arbitrary HTML and credentials never enter the UI or journal.
+        raw = exc.read(8192)
+        detail = ''
+        try:
+            payload = json.loads(raw.decode('utf-8'))
+            if isinstance(payload, dict):
+                detail = _ingest_error(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        status = f'HTTP {exc.code}'
+        raise RuntimeError(f'{status}: {detail}' if detail else status) from None
+
+
+# ---- local target: snapshots on disk, served by this box's nginx ----------
+# State (owner identities, source names) lives OUTSIDE the served directory —
+# nginx serves dotfiles, so a metadata file under public_dir would be readable.
+_state_lock = threading.Lock()
+
+
+class _FileLock:
+    """Cross-PROCESS lock. The --cleanup sweep is a separate oneshot process, so
+    an in-process lock alone would lose updates between publish and sweep."""
+
+    def __init__(self, path):
+        self.path, self.fh = path, None
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
+        self.fh = open(self.path, 'a+')
+        try:
+            fcntl.flock(self.fh, fcntl.LOCK_EX)
+        except Exception:
+            self.fh.close()
+            self.fh = None
+            raise
+        return self
+
+    def __exit__(self, *_exc):
+        try:
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
+        finally:
+            self.fh.close()
+
+
+def _ttl_hours(v):
+    try:
+        h = int(v)
+    except (TypeError, ValueError):
+        return TTL_DEFAULT_H
+    return max(TTL_MIN_H, min(TTL_MAX_H, h))
+
+
+def _target_dir(mode):
+    return GATED_DIR if mode == 'gated' else PUBLIC_DIR
+
+
+def _slug_dir(slug, mode='open'):
+    """Target/<slug> — only if the slug is well-formed AND resolves to a
+    direct child of PUBLIC_DIR (blocks traversal and symlinked slug dirs)."""
+    root = _target_dir(mode)
+    if not slug or not _RE_SLUG.match(slug) or not root:
+        return None
+    p = os.path.join(root, slug)
+    if os.path.dirname(os.path.realpath(p)) != os.path.realpath(root):
+        return None
+    return p
+
+
+def _remove_slug_dir(slug, mode='open'):
+    """Delete <slug>/ — files directly inside plus the directory. Never
+    recursive: we only ever write index.html, so anything else is a surprise
+    and should be left for a human to look at."""
+    p = _slug_dir(slug, mode)
+    if not p or os.path.islink(p) or not os.path.isdir(p):
+        return False
+    try:
+        names = os.listdir(p)
+    except OSError as e:
+        sys.stderr.write(f'[stationdesk-publish] cannot inspect {p}: {e}\n')
+        return False
+    # Preflight before deleting anything. An unexpected nested directory must
+    # leave the entire snapshot intact, especially before a mode transition.
+    if any(not (os.path.isfile(os.path.join(p, name)) or os.path.islink(os.path.join(p, name)))
+           for name in names):
+        sys.stderr.write(f'[stationdesk-publish] refusing non-flat slug dir: {p}\n')
+        return False
+    for name in names:
+        f = os.path.join(p, name)
+        try:
+            if os.path.isfile(f) or os.path.islink(f):
+                os.unlink(f)
+        except OSError as e:
+            sys.stderr.write(f'[stationdesk-publish] unlink {f}: {e}\n')
+    try:
+        os.rmdir(p)
+        return True
+    except OSError as e:
+        sys.stderr.write(f'[stationdesk-publish] rmdir {p}: {e}\n')
+        return False
+
+
+def _state_load():
+    """Never raises. Corrupt state is moved aside rather than deleted — but see
+    _reconcile(): starting from empty would otherwise orphan live public files
+    forever (nginx keeps serving them, revoke/sweep refuse to touch them)."""
+    try:
+        with open(STATE_FILE, 'r', encoding='utf-8') as fh:
+            d = json.load(fh)
+        if isinstance(d, dict) and isinstance(d.get('items'), dict):
+            return d
+        raise ValueError('unexpected shape')
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        bad = f'{STATE_FILE}.corrupt-{int(time.time())}'
+        try:
+            os.replace(STATE_FILE, bad)
+            sys.stderr.write(f'[stationdesk-publish] state unreadable ({e}) — moved to {bad}\n')
+        except OSError:
+            sys.stderr.write(f'[stationdesk-publish] state unreadable ({e}) and could not be moved\n')
+    return {'version': 1, 'items': {}}
+
+
+def _state_save(state):
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    tmp = f'{STATE_FILE}.tmp-{secrets.token_hex(4)}'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(state, fh, ensure_ascii=False, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, STATE_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _transaction_artifacts(root):
+    artifacts = {}
+    if not root:
+        return artifacts
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return artifacts
+    for name in names:
+        match = _RE_TRANSACTION.fullmatch(name)
+        if not match:
+            continue
+        path = os.path.join(root, name)
+        if not os.path.lexists(path):
+            continue
+        artifacts.setdefault(match.group('slug'), []).append((match.group('kind'), path))
+    return artifacts
+
+
+def _remove_transaction_artifact(kind, path):
+    try:
+        if os.path.islink(path) or not os.path.isdir(path):
+            os.unlink(path)
+        else:
+            shutil.rmtree(path)
+        sys.stderr.write(f'[stationdesk-publish] removed transaction {kind} {path}\n')
+        return True
+    except OSError as exc:
+        sys.stderr.write(f'[stationdesk-publish] cannot remove transaction {kind} {path}: {exc}\n')
+        return False
+
+
+def _reconcile(state, now):
+    """Converge disk <-> state, both directions.
+    - a slug dir with no entry is ADOPTED with a short grace expiry (owner None
+      => listed to nobody, but swept) so orphaned public content dies in a day
+      instead of living forever;
+    - expired owned entries keep their URL history after content is removed;
+    - other entries whose dir is gone are dropped."""
+    items = state['items']
+    # An untracked gated directory is adopted for safe expiry, but it must not
+    # retain an auth file after state loss: otherwise the old password lives on.
+    known_gated_before = {slug for slug, item in items.items()
+                          if item.get('mode', 'open') == 'gated'}
+    for mode, root in (('open', PUBLIC_DIR), ('gated', GATED_DIR)):
+        artifacts = _transaction_artifacts(root)
+        for slug, entries in artifacts.items():
+            live = os.path.join(root, slug)
+            old_dirs = [path for kind, path in entries
+                        if kind == 'old' and not os.path.islink(path) and os.path.isdir(path)]
+            # A backup that gets renamed back into place is gone from its old name;
+            # trying to delete it afterwards would log a failure for something that
+            # actually succeeded, and a log that cries wolf stops being read.
+            consumed = None
+            if not os.path.lexists(live) and old_dirs:
+                # The newest renamed backup is closest to the interrupted replacement.
+                chosen = max(old_dirs, key=lambda path: (os.stat(path).st_ctime_ns, path))
+                try:
+                    os.replace(chosen, live)
+                    consumed = chosen
+                    sys.stderr.write(f'[stationdesk-publish] recovered {live} from transaction backup {chosen}\n')
+                except OSError as exc:
+                    sys.stderr.write(f'[stationdesk-publish] cannot recover {live} from {chosen}: {exc}\n')
+            for kind, path in entries:
+                if path == consumed:
+                    continue
+                if kind == 'old' and not os.path.lexists(live):
+                    continue
+                _remove_transaction_artifact(kind, path)
+        try:
+            on_disk = {n for n in os.listdir(root)
+                       if _RE_SLUG.match(n) and os.path.isdir(os.path.join(root, n))}
+        except OSError:
+            on_disk = set()
+        known = {slug for slug, it in items.items() if it.get('mode', 'open') == mode}
+        for slug in on_disk - known:
+            if slug not in items:
+                items[slug] = {'owner': None, 'src': None, 'title': slug,
+                               'expiry': now + RECONCILE_GRACE, 'created': now,
+                               'bytes': 0, 'mode': mode}
+                sys.stderr.write(f'[stationdesk-publish] adopted untracked {mode} dir {slug} (expires in 24h)\n')
+        for slug in known - on_disk:
+            item = items[slug]
+            if mode == 'gated':
+                # A manually removed gated directory must not strand a valid
+                # credential that can no longer be reached through state APIs.
+                try:
+                    _update_htpasswd(slug, None)
+                except Exception as exc:
+                    # A missing/unwritable optional gate must not block open reconciliation;
+                    # retain this item so a later sweep can retry credential cleanup.
+                    sys.stderr.write(f'[stationdesk-publish] cannot remove credential for {slug}: {exc}\n')
+                    continue
+            if item.get('owner') and item.get('src') and (
+                    item.get('expired') or (item.get('expiry') or 0) <= now):
+                item['expired'] = True
+            else:
+                items.pop(slug, None)
+    try:
+        auth_files = os.listdir(HTPASSWD_DIR)
+    except OSError:
+        auth_files = []
+    for name in auth_files:
+        if not name.endswith('.htpasswd'):
+            continue
+        slug = name[:-len('.htpasswd')]
+        item = items.get(slug)
+        if (not _RE_SLUG.match(slug) or slug not in known_gated_before or not item
+                or item.get('mode', 'open') != 'gated'):
+            path = os.path.join(HTPASSWD_DIR, name)
+            try:
+                os.unlink(path)
+            except OSError as exc:
+                sys.stderr.write(f'[stationdesk-publish] unlink orphan credential {path}: {exc}\n')
+    return state
+
+
+def _sweep(state, now):
+    gone = []
+    for slug, item in list(state['items'].items()):
+        if not item.get('expired') and (item.get('expiry') or 0) > now:
+            continue
+        mode = item.get('mode', 'open')
+        if item.get('expired') and not os.path.lexists(_slug_dir(slug, mode)):
+            continue
+        if not _remove_slug_dir(slug, mode):
+            # Keep state for a later filesystem cleanup retry, but expiry must
+            # still revoke access to a gated page even when its directory is
+            # unexpectedly non-flat and cannot be safely removed.
+            if mode == 'gated':
+                try:
+                    _update_htpasswd(slug, None)
+                except Exception as exc:
+                    sys.stderr.write(f'[stationdesk-publish] cannot remove credential for {slug}: {exc}\n')
+            continue
+        if mode == 'gated':
+            try:
+                _update_htpasswd(slug, None)
+            except Exception as exc:
+                # Keep state when credential cleanup fails so the next sweep retries it.
+                sys.stderr.write(f'[stationdesk-publish] cannot remove credential for {slug}: {exc}\n')
+                continue
+        if item.get('owner') and item.get('src'):
+            item['expired'] = True
+        else:
+            state['items'].pop(slug, None)
+        gone.append(slug)
+    return gone
+
+
+def _mint_slug(state, base):
+    stem = re.sub(r'-[0-9a-f]{6}\Z', '', base or '') or 'doc'
+    for _ in range(50):
+        cand = f'{stem}-{secrets.token_hex(3)}'
+        if (cand not in state['items'] and not os.path.exists(os.path.join(PUBLIC_DIR, cand))
+                and not os.path.exists(os.path.join(GATED_DIR, cand))):
+            return cand
+    return f'doc-{secrets.token_hex(6)}'
+
+
+def _files_valid(files):
+    if not isinstance(files, dict) or not files:
+        return False
+    return all(isinstance(name, str) and name and '/' not in name and '\\' not in name
+               and name != '.' and not name.startswith('.') and isinstance(data, bytes)
+               for name, data in files.items())
+
+
+def _htpasswd_hash(slug, password):
+    """Ask htpasswd for bcrypt via stdin, so the password is not in argv."""
+    try:
+        result = subprocess.run([HTPASSWD_BIN, '-niB', slug], input=password + '\n',
+                                text=True, capture_output=True, check=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BundleValidationError(f'cannot hash gated password: {exc}') from exc
+    line = result.stdout.strip()
+    if not line.startswith(slug + ':'):
+        raise BundleValidationError('htpasswd returned an invalid record')
+    return line
+
+
+def _htpasswd_path(slug):
+    if not slug or not _RE_SLUG.match(slug):
+        return None
+    path = os.path.join(HTPASSWD_DIR, slug + '.htpasswd')
+    return path if os.path.dirname(os.path.realpath(path)) == os.path.realpath(HTPASSWD_DIR) else None
+
+
+def _update_htpasswd(slug, password=None):
+    """Atomically write one credential file per slug, or remove it."""
+    path = _htpasswd_path(slug)
+    if not path:
+        raise BundleValidationError(f'invalid slug: {slug}')
+    if password is None:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        return
+    os.makedirs(HTPASSWD_DIR, mode=0o755, exist_ok=True)
+    os.chmod(HTPASSWD_DIR, 0o755)
+    tmp = f'{path}.tmp-{secrets.token_hex(4)}'
+    # This is intentionally world-readable: local users can already read the
+    # 0755 gated webroot, while nginx workers must read this bcrypt hash per request.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        fh.write(_htpasswd_hash(slug, password) + '\n')
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def _local_ingest(slug, owner, src, title, ttl_hours, files, mode='open', password=''):
+    if not _files_valid(files):
+        return {'ok': False, 'error': 'invalid bundle files'}
+    total_bytes = sum(len(data) for data in files.values())
+    if total_bytes > LOCAL_MAX_BYTES:
+        return {'ok': False, 'error': f'snapshot too large (>{LOCAL_MAX_BYTES // (1024 * 1024)}MB)'}
+    if mode not in ('open', 'gated'):
+        return {'ok': False, 'error': 'mode must be open or gated'}
+    if mode == 'gated' and not gated_available():
+        return {'ok': False, 'error': 'gated publish unavailable: ' + gated_unavailable_reason()}
+    ttl = _ttl_hours(ttl_hours)
+    now = int(time.time())
+
+    def _flat_dir(path):
+        if not path or os.path.islink(path) or not os.path.isdir(path):
+            return False
+        try:
+            return all(os.path.isfile(os.path.join(path, name)) or
+                       os.path.islink(os.path.join(path, name))
+                       for name in os.listdir(path))
+        except OSError:
+            return False
+
+    def _remove_flat_dir(path):
+        if not path or not os.path.lexists(path):
+            return True
+        if not _flat_dir(path):
+            return False
+        try:
+            for name in os.listdir(path):
+                os.unlink(os.path.join(path, name))
+            os.rmdir(path)
+            return True
+        except OSError:
+            return False
+
+    def _restore_auth(path, data, mode_bits):
+        if data is None:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            return
+        os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+        tmp = f'{path}.rollback-{secrets.token_hex(4)}'
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode_bits)
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            # Keep rollback usable when the injected failure targets os.replace itself.
+            os.rename(tmp, path)
+
+    def _restore_dir(source, target):
+        try:
+            os.replace(source, target)
+        except OSError:
+            # The fallback is still an atomic same-filesystem rename, but avoids a
+            # one-shot os.replace failure masking the prior live snapshot.
+            os.rename(source, target)
+
+    with _state_lock, _FileLock(LOCK_FILE):
+        state = _reconcile(_state_load(), now)
+        _sweep(state, now)
+        if PUBLIC_MODE == 'local':
+            # Local slug reuse must share this lock with the subsequent write.
+            reusable = sorted(s for s, item in state['items'].items()
+                              if item.get('owner') == owner and item.get('src') == src)
+            if reusable:
+                slug = reusable[0]
+        cur = state['items'].get(slug)
+        # Never write over someone else's slug (or an unexpected dir) — mint one.
+        if (cur and cur.get('owner') != owner) or (not cur and (
+                os.path.exists(os.path.join(PUBLIC_DIR, slug)) or
+                os.path.exists(os.path.join(GATED_DIR, slug)))):
+            slug = _mint_slug(state, slug)
+            cur = None
+        d = _slug_dir(slug, mode)
+        if not d:
+            return {'ok': False, 'error': f'invalid slug: {slug}'}
+        expiry = now + ttl * 3600
+        old_mode = (cur or {}).get('mode', 'open')
+        if mode == 'gated':
+            storage_problem = _gated_storage_check()
+            if storage_problem:
+                return {'ok': False, 'error': 'gated publish unavailable: ' + storage_problem}
+
+        # Search-engine indexing is a per-document choice that survives Update; a
+        # password page is never indexable.
+        indexed = bool((cur or {}).get('indexed')) and mode == 'open'
+        old_dir = _slug_dir(slug, old_mode) if cur else None
+        if cur and cur.get('expired') and not os.path.lexists(old_dir):
+            old_dir = None
+        if old_dir and not _flat_dir(old_dir):
+            # Preserve the existing fail-closed behavior for unexpected nested content.
+            return {'ok': False, 'error': 'cannot remove prior mode snapshot; refusing mode transition'}
+        if old_dir != d and os.path.lexists(d):
+            return {'ok': False, 'error': 'target slug already exists in the requested mode'}
+
+        auth_path = _htpasswd_path(slug)
+        old_auth = None
+        old_auth_mode = 0o644
+        if auth_path:
+            try:
+                with open(auth_path, 'rb') as fh:
+                    old_auth = fh.read()
+                old_auth_mode = os.stat(auth_path).st_mode & 0o777
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                return {'ok': False, 'error': f'cannot read prior credential: {exc}'}
+
+        # Prefix artifacts with the slug so reconcile can identify their transaction.
+        stage = f'{d}.stage-{secrets.token_hex(8)}'
+        try:
+            os.makedirs(_target_dir(mode), mode=0o755, exist_ok=True)
+            os.mkdir(stage, 0o755)
+            os.chmod(stage, 0o755)
+            # Build every member beside the live directory so a partial bundle is never served.
+            for member, data in (files | ({INDEXABLE: b''} if indexed else {})).items():
+                tmp = os.path.join(stage, f'.tmp-{secrets.token_hex(4)}')
+                with open(tmp, 'wb') as fh:
+                    fh.write(data)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.chmod(tmp, 0o644)
+                os.replace(tmp, os.path.join(stage, member))
+        except Exception as exc:
+            _remove_flat_dir(stage)
+            return {'ok': False, 'error': f'cannot stage snapshot: {exc}'}
+
+        backup = None
+        installed = False
+        previous_item = dict(state['items'][slug]) if slug in state['items'] else None
+        state_save_attempted = False
+
+        def rollback():
+            errors = []
+            if installed and os.path.lexists(d):
+                failed = None
+                if not _remove_flat_dir(d):
+                    failed = f'{d}.failed-{secrets.token_hex(4)}'
+                    try:
+                        os.replace(d, failed)
+                    except OSError:
+                        try:
+                            os.rename(d, failed)
+                        except OSError as exc:
+                            errors.append(f'cannot hide failed snapshot {d}: {exc}')
+                            failed = None
+                    if failed and not _remove_flat_dir(failed):
+                        errors.append(f'cannot remove failed snapshot {failed}')
+            if backup and not os.path.lexists(old_dir):
+                try:
+                    _restore_dir(backup, old_dir)
+                except OSError as exc:
+                    errors.append(f'cannot restore prior snapshot {old_dir}: {exc}')
+            if os.path.lexists(stage) and not _remove_flat_dir(stage):
+                errors.append(f'cannot remove staging directory {stage}')
+            if auth_path:
+                try:
+                    _restore_auth(auth_path, old_auth, old_auth_mode)
+                except Exception as exc:
+                    errors.append(f'cannot restore prior credential {auth_path}: {exc}')
+            return errors
+
+        def rollback_state():
+            if previous_item is None:
+                state['items'].pop(slug, None)
+            else:
+                state['items'][slug] = previous_item
+            if not state_save_attempted:
+                return []
+            try:
+                _state_save(state)
+            except Exception as exc:
+                return [f'cannot restore publish state: {exc}']
+            return []
+
+        try:
+            state['items'][slug] = {'owner': owner, 'src': src, 'title': title, 'expiry': expiry,
+                                    'created': (cur or {}).get('created', now), 'bytes': total_bytes,
+                                    'mode': mode, 'indexed': indexed, 'snapshot_at': now}
+            state_save_attempted = True
+            # Persist state before content so a crash cannot leave an untracked public snapshot.
+            _state_save(state)
+        except Exception as exc:
+            rollback_errors = rollback() + rollback_state()
+            error = f'cannot save publish state: {exc}'
+            if rollback_errors:
+                error += '; rollback incomplete: ' + '; '.join(rollback_errors)
+            return {'ok': False, 'error': error}
+
+        try:
+            if mode == 'gated':
+                # Between invalidation and the new hash, either snapshot may exist but neither is readable.
+                _update_htpasswd(slug, None)
+            # Rename the old directory out of the way only after the complete stage succeeded.
+            if old_dir:
+                backup = f'{old_dir}.old-{secrets.token_hex(4)}'
+                os.replace(old_dir, backup)
+            os.replace(stage, d)
+            installed = True
+            if mode == 'gated':
+                _update_htpasswd(slug, password)
+            elif old_mode == 'gated':
+                _update_htpasswd(slug, None)
+        except Exception as exc:
+            rollback_errors = rollback() + rollback_state()
+            error = f'cannot commit snapshot: {exc}'
+            if rollback_errors:
+                error += '; rollback incomplete: ' + '; '.join(rollback_errors)
+            return {'ok': False, 'error': error}
+
+        if backup and not _remove_flat_dir(backup):
+            try:
+                # This path is a transaction directory created by this call, not user content.
+                shutil.rmtree(backup)
+            except OSError as exc:
+                sys.stderr.write(f'[stationdesk-publish] cannot remove prior snapshot backup {backup}: {exc}\n')
+    return {'ok': True, 'result': {'slug': slug, 'expiry': expiry, 'ttl_hours': ttl}}
+
+
+def _local_sweep_only():
+    """Timer entry — expire public snapshots without a page visit."""
+    # Gated storage is optional; its absence must not disable open TTL cleanup.
+    if not (PUBLIC_MODE == 'local' and PUBLIC_DIR and os.path.isdir(PUBLIC_DIR)):
+        return []
+    now = int(time.time())
+    with _state_lock, _FileLock(LOCK_FILE):
+        state = _reconcile(_state_load(), now)
+        gone = _sweep(state, now)
+        _state_save(state)
+    return gone
+
+
+def _local_refresh(now):
+    state = _reconcile(_state_load(), now)
+    _sweep(state, now)
+    _state_save(state)
+    return state
+
+
+def _is_bundled(slug, item):
+    """A snapshot with linked documents has files beside index.html; Update must keep them."""
+    d = _slug_dir(slug, item.get('mode', 'open'))
+    try:
+        return bool(d) and any(n not in ('index.html', INDEXABLE) for n in os.listdir(d))
+    except OSError:
+        return False
+
+
+def _local_list(owner):
+    now = int(time.time())
+    with _state_lock, _FileLock(LOCK_FILE):
+        state = _local_refresh(now)
+        items = [{'slug': s, 'owner': it['owner'], 'src': it['src'], 'title': it['title'],
+                  'expiry': it['expiry'], 'expired': bool(it.get('expired')) or it['expiry'] <= now,
+                  'mode': it.get('mode', 'open'), 'indexed': bool(it.get('indexed')),
+                  'snapshot_at': it.get('snapshot_at') or it.get('created'),
+                  'bundled': _is_bundled(s, it)}
+                 for s, it in sorted(state['items'].items()) if it.get('owner') == owner]
+    return {'ok': True, 'items': items}
+
+
+def _local_mutate(slug, owner, fn):
+    """Owner-scoped read-modify-write. A foreign or unknown slug is 'not found'
+    — the same answer either way, so it cannot be used to probe."""
+    now = int(time.time())
+    with _state_lock, _FileLock(LOCK_FILE):
+        state = _local_refresh(now)
+        it = state['items'].get(slug)
+        if not it or it.get('owner') != owner:
+            return {'ok': False, 'error': 'not found'}
+        res = fn(state, slug, it, now)
+        _state_save(state)
+    return res
+
+
+def _local_revoke(slug, owner):
+    def _do(state, s, _it, _now):
+        snapshot = _slug_dir(s, _it.get('mode', 'open'))
+        if os.path.lexists(snapshot) and not _remove_slug_dir(s, _it.get('mode', 'open')):
+            if _it.get('mode', 'open') == 'gated':
+                _update_htpasswd(s, None)
+            return {'ok': False, 'error': 'cannot remove snapshot directory'}
+        if _it.get('mode', 'open') == 'gated':
+            _update_htpasswd(s, None)
+        state['items'].pop(s, None)
+        return {'ok': True, 'slug': s}
+    return _local_mutate(slug, owner, _do)
+
+
+def _local_set_indexed(slug, owner, on):
+    def _do(_state, s, it, _now):
+        d = _slug_dir(s, 'open')
+        if it.get('mode', 'open') != 'open' or it.get('expired') or not d or not os.path.isdir(d):
+            return {'ok': False, 'error': 'only a live open link can be indexed'}
+        marker = os.path.join(d, INDEXABLE)
+        if on:
+            with open(marker, 'wb'):
+                pass
+            os.chmod(marker, 0o644)
+        elif os.path.lexists(marker):
+            os.unlink(marker)
+        it['indexed'] = bool(on)
+        return {'ok': True, 'slug': s, 'indexed': bool(on)}
+    return _local_mutate(slug, owner, _do)
+
+
+def _local_set_expiry(slug, owner, ttl_hours):
+    def _do(_state, s, it, now):
+        it['expiry'] = now + _ttl_hours(ttl_hours) * 3600
+        return {'ok': True, 'slug': s, 'expiry': it['expiry']}
+    return _local_mutate(slug, owner, _do)
+
+
+def publish_public(name, ttl_hours, owner, mode='open', password='', docs=None, plan_id=''):
+    if not PUBLIC_ENABLED:
+        return False, 'external publish not configured (state/publish.env)'
+    if PUBLIC_MODE == 'local' and not owner:
+        return False, 'identity header missing — refusing to publish without an owner'
+    if mode not in ('open', 'gated'):
+        return False, 'mode must be open or gated'
+    # Both of these used to be flat "local only". That was true of the v0 receiver
+    # this app first shipped against, and stopped being true when the receiver grew
+    # contract v1 — but the refusals stayed, so a box with a v1 receiver was told the
+    # feature did not exist. Ask the receiver instead; the safety property (never turn
+    # an explicit password request into an unauthenticated open URL) is unchanged and
+    # is now enforced by refusing rather than by downgrading.
+    if PUBLIC_MODE != 'local' and docs is not None and not remote_supports('1'):
+        return False, ('bundle publishing needs contract v1 from the receiver; '
+                       + gated_unavailable_reason())
+    if PUBLIC_MODE != 'local' and mode == 'gated' and not remote_supports('1', 'gated'):
+        return False, ('gated publishing needs contract v1 from the receiver; '
+                       + gated_unavailable_reason())
+    # Validate the credential before reading or writing any source/public data.
+    if mode == 'gated' and (not isinstance(password, str) or not password):
+        return False, 'gated publish requires a password'
+    # A control character would be silently truncated: htpasswd reads one line from stdin,
+    # so "abc\ndef" would store the credential "abc" while the person who typed it believes
+    # the password is longer. Refuse instead of weakening it behind their back. htpasswd
+    # also caps bcrypt input at 72 bytes and would quietly ignore the rest.
+    if mode == 'gated':
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in password):
+            return False, 'password must not contain control characters or line breaks'
+        if len(password.encode('utf-8')) > 72:
+            return False, 'password must be at most 72 bytes (the bcrypt limit)'
+    if docs is not None and (not isinstance(docs, list) or any(not isinstance(doc, str) or not doc for doc in docs)):
+        return False, 'docs must be a list of document names'
+    path = safe_resolve(name)
+    if not path or not os.path.lexists(path):
+        return False, f'not found: {name}'
+    if not name.lower().endswith(('.html', '.htm')):
+        return False, 'only HTML pages can be published externally'
+    warnings = []
+    if docs:
+        plan_ok, plan = _consume_bundle_plan(plan_id, owner, name, docs)
+        if not plan_ok:
+            return False, plan
+        try:
+            title, files, warnings, current = build_bundle_files(name, docs, include_integrity=True)
+        except Exception as e:
+            return False, f'bundle failed: {e}'
+        changed = [doc for doc in dict.fromkeys(docs)
+                   if plan['candidates'][doc]['digest'] != current[doc]['digest']]
+        if changed:
+            return False, 'source changed after bundle plan: ' + ', '.join(changed)
+        html_bytes = None
+    else:
+        try:
+            title, html_bytes, asset_warnings = bundle_single_file(name)
+            # Same channel the bundle path already uses: the caller shows these,
+            # so a page that shipped without its stylesheet says so at publish time
+            # instead of being discovered later in a browser.
+            warnings = asset_warnings
+            files = {'index.html': html_bytes}
+        except Exception as e:
+            return False, f'bundle failed: {e}'
+    files = {member: with_site_icon(data) if member.lower().endswith(('.html', '.htm')) else data
+             for member, data in files.items()}
+    if html_bytes is not None:
+        html_bytes = files['index.html']
+    slug = _slugify(title, name)
+    if PUBLIC_MODE != 'local':
+        # Remote ingest owns the remote slug contract; local reuse happens inside _local_ingest's lock.
+        existing = public_list(owner)
+        if existing.get('ok'):
+            items = existing.get('items', [])
+            live = next((it for it in items
+                         if it.get('src') == name and not it.get('expired')), None)
+            reused = live['slug'] if live else next(
+                (it['slug'] for it in items if it.get('src') == name), None)
+            # Reusing the slug keeps the URL, and that is the problem: a URL already
+            # handed out as open would start asking for a password, or a gated one
+            # would quietly stop asking. Whoever holds the link is not told either
+            # way. Changing what a live link means is a revoke-and-republish, so the
+            # new URL is the signal that the old one is gone.
+            if live and live.get('mode', 'open') != mode:
+                return False, (
+                    f'{name} is already published as {live.get("mode", "open")} at '
+                    f'{BASE_URL}/{live["slug"]}/ — revoke it first, then publish as '
+                    f'{mode}. Switching in place would change what an already-shared '
+                    'link does without telling anyone holding it.')
+            if reused:
+                slug = reused
+    if PUBLIC_MODE == 'local':
+        try:
+            res = _local_ingest(slug, owner, name, title, ttl_hours, files, mode, password)
+        except Exception as e:
+            return False, f'local ingest failed: {e}'
+    else:
+        use_v1 = remote_supports('1')
+        # 'unknown' used to be substituted for a missing owner. Under v1 that is a
+        # rejected identity, and under v0 it published a document nobody could look
+        # up or revoke. Refuse before the payload leaves.
+        problem = owner_shape_problem(owner)
+        if problem and (use_v1 or mode == 'gated'):
+            return False, problem
+        if mode == 'gated' and not use_v1:
+            return False, ('gated publishing needs contract v1 from the receiver; '
+                           + gated_unavailable_reason())
+        try:
+            payload = {
+                'slug': slug, 'owner': owner or 'unknown', 'src': name, 'title': title,
+                'ttl_hours': ttl_hours,
+            }
+            if use_v1:
+                payload['contract_version'] = '1'
+                # v1 carries every document in one files map, entry named index.html.
+                payload['files'] = {member: base64.b64encode(data).decode('ascii')
+                                    for member, data in files.items()}
+            elif docs:
+                payload['files'] = {member: base64.b64encode(data).decode('ascii') for member, data in files.items()}
+            else:
+                payload['html_b64'] = base64.b64encode(html_bytes).decode('ascii')
+            # Only v1 carries an explicit mode. A v0 receiver has been getting
+            # payloads without one since before v1 existed, and adding a key to that
+            # wire format to make the code tidier is not a change worth risking on
+            # receivers we do not control.
+            if use_v1:
+                payload['mode'] = mode
+            if mode == 'gated':
+                payload.update({'mode': 'gated', 'gate': {'type': 'password', 'password': password}})
+            res = _ingest('POST', '/ingest', payload)
+        except Exception as e:
+            return False, f'ingest failed: {e}'
+    if not isinstance(res, dict):
+        return False, 'ingest returned an invalid response'
+    if not res.get('ok'):
+        return False, _ingest_error(res)
+    r = res.get('result', {})
+    if not isinstance(r, dict) or 'expiry' not in r:
+        return False, 'ingest returned an invalid result'
+    slug = r.get('slug', slug)      # the local target may mint a fresh slug
+    prefix = '/g' if mode == 'gated' and PUBLIC_MODE == 'local' else ''
+    return True, {'url': f'{BASE_URL}{prefix}/{slug}/', 'slug': slug, 'expiry': r.get('expiry'),
+                  'ttl_hours': r.get('ttl_hours'), 'mode': mode,
+                  'bundle': sorted(files) if docs else None, 'warnings': warnings}
+
+
+def _local_guard(owner):
+    """Local mode has no second service to scope by token, so the hub identity
+    IS the boundary. An empty owner means the request did not pass the gate."""
+    if not PUBLIC_ENABLED:
+        return {'ok': False, 'error': 'external publish not configured'}
+    if PUBLIC_MODE == 'local' and not owner:
+        return {'ok': False, 'error': 'identity header missing'}
+    return None
+
+
+def public_list(owner):
+    bad = _local_guard(owner)
+    if bad:
+        return bad
+    if PUBLIC_MODE == 'local':
+        d = _local_list(owner)
+    else:
+        ep = '/list' + (('?owner=' + urllib.parse.quote(owner)) if owner else '')
+        try:
+            d = _ingest('GET', ep, timeout=12)
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+    if not isinstance(d, dict):
+        return {'ok': False, 'error': 'ingest returned an invalid response'}
+    items = d.get('items', [])
+    if (not isinstance(items, list) or
+            any(not isinstance(it, dict) or not isinstance(it.get('slug'), str) for it in items)):
+        return {'ok': False, 'error': 'ingest returned an invalid item list'}
+    for it in items:
+        prefix = '/g' if PUBLIC_MODE == 'local' and it.get('mode', 'open') == 'gated' else ''
+        it['url'] = f'{BASE_URL}{prefix}/{it["slug"]}/'
+    return d
+
+
+def public_revoke(slug, owner):
+    bad = _local_guard(owner)
+    if bad:
+        return bad
+    if PUBLIC_MODE == 'local':
+        return _local_revoke(slug, owner)
+    try:
+        return _ingest('POST', '/revoke', {'slug': slug, 'owner': owner}, timeout=12)
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
+def public_set_expiry(slug, owner, ttl_hours):
+    bad = _local_guard(owner)
+    if bad:
+        return bad
+    if PUBLIC_MODE == 'local':
+        return _local_set_expiry(slug, owner, ttl_hours)
+    try:
+        return _ingest('POST', '/set-expiry', {'slug': slug, 'owner': owner, 'ttl_hours': ttl_hours}, timeout=12)
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
+def indexing_status():
+    """Whether the per-document search-engine switch can take effect, and if not, why.
+    Only the Funnel server reads the marker; a receiver we do not run cannot be told."""
+    if PUBLIC_MODE == 'local' and FUNNEL_PORT:
+        return {'available': True, 'reason': ''}
+    if PUBLIC_MODE == 'local':
+        return {'available': False, 'reason': 'Your own web server decides what search engines may index.'}
+    return {'available': False, 'reason': 'The ingest service has no setting for this yet, so its pages stay noindex.'}
+
+
+def public_set_indexed(slug, owner, on):
+    bad = _local_guard(owner)
+    if bad:
+        return bad
+    status = indexing_status()
+    if not status['available']:
+        return {'ok': False, 'error': status['reason']}
+    return _local_set_indexed(slug, owner, on)
+
+
+# ==== uploads — clipboard image / arbitrary file drop into ~/uploads ====
+_RE_UPLOAD = re.compile(r'^image([0-9]{3,})-[0-9]{8}-[0-9]{6}\.jpg\Z')   # only auto-named files (protect manual ones)
+_RE_UPLOAD_FILE = re.compile(r'^file([0-9]{3,})-[0-9]{8}-[0-9]{6}\.[a-z0-9]{1,8}\Z')
+UPLOAD_TTL_SEC = 24 * 3600
+UPLOAD_MAX_BYTES = 12 * 1024 * 1024
+FILE_MAX_BYTES = 50 * 1024 * 1024
+_RE_FILE_SAFE = re.compile(r'[^0-9A-Za-z._ \-()]+')            # filename allowlist (blocks traversal/control chars)
+_upload_lock = threading.Lock()
+
+
+def cleanup_old_uploads():
+    if not os.path.isdir(UPLOADS):
+        return 0
+    cutoff = time.time() - UPLOAD_TTL_SEC
+    removed = 0
+    for name in os.listdir(UPLOADS):
+        full = os.path.join(UPLOADS, name)
+        try:
+            if ((_RE_UPLOAD.fullmatch(name) or _RE_UPLOAD_FILE.fullmatch(name))
+                    and os.path.isfile(full) and not os.path.islink(full)
+                    and os.path.getmtime(full) < cutoff):
+                os.unlink(full)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def _next_upload_seq(pattern=_RE_UPLOAD):
+    mx = 0
+    if os.path.isdir(UPLOADS):
+        for name in os.listdir(UPLOADS):
+            m = pattern.match(name)
+            if m and os.path.isfile(os.path.join(UPLOADS, name)):
+                mx = max(mx, int(m.group(1)))
+    return mx + 1
+
+
+def save_uploaded_image(image_b64):
+    """base64 JPEG -> ~/uploads/imageNNN-<ts>.jpg. Server-generated name (no traversal)."""
+    if not image_b64 or not isinstance(image_b64, str):
+        return False, 'no image'
+    if image_b64.startswith('data:'):
+        comma = image_b64.find(',')
+        if comma != -1:
+            image_b64 = image_b64[comma + 1:]
+    try:
+        raw = base64.b64decode(image_b64, validate=True)
+    except Exception:
+        return False, 'invalid base64'
+    if not raw:
+        return False, 'empty image'
+    if len(raw) > UPLOAD_MAX_BYTES:
+        return False, f'image too large (>{UPLOAD_MAX_BYTES // (1024 * 1024)}MB)'
+    if raw[:3] != b'\xff\xd8\xff':
+        return False, 'not a jpeg'
+    with _upload_lock:
+        cleanup_old_uploads()
+        os.makedirs(UPLOADS, exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+        n = _next_upload_seq()
+        for _ in range(100):
+            fname = f'image{n:03d}-{ts}.jpg'
+            fpath = os.path.join(UPLOADS, fname)
+            try:
+                fd = os.open(fpath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
+                n += 1
+                continue
+            with os.fdopen(fd, 'wb') as f:
+                f.write(raw)
+            return True, {'name': fname, 'path': os.path.join(UPLOADS, fname), 'n': n, 'bytes': len(raw)}
+    return False, 'sequence exhausted'
+
+
+def _safe_upload_name(name):
+    base = os.path.basename(str(name or '').replace('\\', '/')).strip()
+    base = _RE_FILE_SAFE.sub('_', base).lstrip('.').strip() or 'file'
+    return base[:120]
+
+
+def save_uploaded_file(filename, data_b64, destination=None):
+    """Save a file without overwriting. Card uploads default to the temporary
+    uploads directory; the manager supplies the persistent shared directory."""
+    if not data_b64 or not isinstance(data_b64, str):
+        return False, 'no data'
+    if data_b64.startswith('data:'):
+        comma = data_b64.find(',')
+        if comma != -1:
+            data_b64 = data_b64[comma + 1:]
+    try:
+        raw = base64.b64decode(data_b64, validate=True)
+    except Exception:
+        return False, 'invalid base64'
+    if not raw:
+        return False, 'empty file'
+    if len(raw) > FILE_MAX_BYTES:
+        return False, f'file too large (>{FILE_MAX_BYTES // (1024 * 1024)}MB)'
+    safe = _safe_upload_name(filename)
+    directory = UPLOADS if destination is None else destination
+    with _upload_lock:
+        cleanup_old_uploads()
+        os.makedirs(directory, exist_ok=True)
+        stem, ext = os.path.splitext(safe)
+        temporary = destination is None
+        if temporary:
+            ext = ext.lstrip('.').lower()
+            ext = ext if re.fullmatch(r'[a-z0-9]{1,8}', ext) else 'bin'
+            n = _next_upload_seq(_RE_UPLOAD_FILE)
+            ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+            ext = '.' + ext
+        for i in range(1000):
+            if temporary:
+                cand = f'file{n + i:03d}-{ts}{ext}'
+            else:
+                cand = safe if i == 0 else f'{stem}-{i + 1}{ext}'
+            fpath = os.path.join(directory, cand)
+            try:
+                fd = os.open(fpath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, 'wb') as f:
+                f.write(raw)
+            return True, {'name': cand, 'path': fpath, 'bytes': len(raw)}
+    return False, 'name collision exhausted'
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _json(self, status, payload):
+        body = json.dumps(payload).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_body(self):
+        n = int(self.headers.get('Content-Length', '0'))
+        if n <= 0:
+            return {}
+        return json.loads(self.rfile.read(n).decode('utf-8'))
+
+    def _strip(self, path):
+        for prefix in ('/publish/',):
+            if path.startswith(prefix):
+                path = path[len(prefix):]
+                return path if path.startswith('/') else '/' + path
+        return path
+
+    def _owner(self):
+        return self.headers.get(IDENTITY_HEADER, '')
+
+    def authorized(self):
+        owner = os.environ.get('STATIONDESK_OWNER', '')
+        return bool(owner) and self._owner() == owner
+
+    def same_origin(self):
+        # nginx preserves the browser's Host, including local tunnel ports.
+        # TLS can terminate at Serve before the loopback nginx connection.
+        origin = urllib.parse.urlsplit(self.headers.get('Origin', ''))
+        return (origin.scheme in ('http', 'https') and not origin.path
+                and not origin.query and not origin.fragment
+                and bool(origin.netloc)
+                and origin.netloc.lower() == self.headers.get('Host', '').lower())
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = self._strip(parsed.path)
+        if path not in ('/', '/health', '/api/health') and not self.authorized():
+            return self._json(403, {'ok': False, 'error': 'Owner only' if self._owner() else 'identity header missing'})
+        if path in ('/api/meta', '/meta'):
+            if not TITLE_META_ENABLED:
+                self._json(404, {'ok': False, 'error': f'unknown path: {path}'})
+                return
+            if not self._owner():
+                self._json(403, {'ok': False, 'error': 'identity header missing'})
+                return
+            query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            names = query.get('name', [])
+            if len(names) != 1:
+                self._json(400, {'ok': False, 'error': 'exactly one name is required'})
+                return
+            status, payload = read_title_meta(names[0])
+            self._json(status, payload)
+            return
+        if path in ('/api/list', '/list'):
+            self._json(200, {'ok': True, 'items': list_items(), 'root': ROOT, 'public_enabled': PUBLIC_ENABLED,
+                             'public_mode': PUBLIC_MODE, 'gated_enabled': GATED_ENABLED,
+                             'gated_disabled_reason': GATED_DISABLED_REASON, 'doc_url': DOC_URL,
+                             'funnel': funnel_status(), 'site': site_settings(),
+                             'indexing': indexing_status()})
+            return
+        if path in ('/api/health', '/health', '/'):
+            self._json(200, {'ok': True, 'service': 'stationdesk-publish', 'port': PORT, 'public_enabled': PUBLIC_ENABLED,
+                             'public_mode': PUBLIC_MODE, 'gated_enabled': GATED_ENABLED,
+                             'gated_disabled_reason': GATED_DISABLED_REASON})
+            return
+        if path in ('/api/public-list', '/public-list'):
+            self._json(200, public_list(self._owner()))
+            return
+        if path in ('/api/uploads-cleanup', '/uploads-cleanup'):
+            self._json(200, {'ok': True, 'removed': cleanup_old_uploads()})
+            return
+        self._json(404, {'ok': False, 'error': f'unknown path: {path}'})
+
+    def do_POST(self):
+        if not self.authorized() or not self.same_origin():
+            return self._json(403, {'ok': False, 'error': 'Owner and same origin required'})
+        path = self._strip(urllib.parse.urlparse(self.path).path)
+        try:
+            if self.headers.get_content_type() != 'application/json':
+                raise ValueError('Content-Type must be application/json')
+            body = self._read_body()
+            if not isinstance(body, dict):
+                raise ValueError('Expected JSON object')
+        except (ValueError, TypeError) as error:
+            return self._json(400, {'ok': False, 'error': str(error)})
+        if path in ('/api/publish', '/publish'):
+            try:
+                Share(ROOT).publish(body['source'], body['name'], body.get('mode', 'symlink'))
+                return self._json(200, {'ok': True})
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                return self._json(400, {'ok': False, 'error': str(error)})
+        if path in ('/api/unpublish', '/unpublish'):
+            ok, msg = unpublish(body.get('name', ''))
+            self._json(200 if ok else 400, {'ok': ok, 'name': body.get('name', ''), 'message': msg})
+            return
+        if path in ('/api/unpublish-direct', '/unpublish-direct'):
+            ok, msg = unpublish_direct(body.get('name', ''), body.get('confirm_name', ''))
+            self._json(200 if ok else 400, {'ok': ok, 'name': body.get('name', ''), 'message': msg})
+            return
+        if path in ('/api/unpublish-batch', '/unpublish-batch'):
+            names = body.get('names', [])
+            results = unpublish_batch(names if isinstance(names, list) else [], bool(body.get('include_direct', False)))
+            self._json(200, {'ok': True, 'count': len(results), 'ok_count': sum(1 for r in results if r.get('ok')), 'results': results})
+            return
+        if path in ('/api/repair-broken', '/repair-broken'):
+            results = repair_or_cleanup_all()
+            self._json(200, {'ok': True, 'count': len(results), 'results': results})
+            return
+        if path in ('/api/publish-public', '/publish-public'):
+            ok, res = publish_public(body.get('name', ''), body.get('ttl_hours'), self._owner(),
+                                     body.get('mode', 'open'), body.get('password', ''),
+                                     body.get('docs'), body.get('plan_id', ''))
+            self._json(200 if ok else 400, {'ok': ok, 'result': res} if ok else {'ok': ok, 'error': res})
+            return
+        if path in ('/api/publish-plan', '/publish-plan'):
+            if PUBLIC_MODE != 'local' and not remote_supports('1'):
+                self._json(400, {'ok': False, 'error':
+                                 'bundle planning needs contract v1 from the receiver; '
+                                 + gated_unavailable_reason()})
+                return
+            owner = self._owner()
+            if PUBLIC_MODE == 'local' and not owner:
+                self._json(400, {'ok': False, 'error': 'identity header missing'})
+                return
+            ok, res = plan_bundle(body.get('entry', body.get('name', '')), body.get('max_docs'), owner)
+            self._json(200 if ok else 400, {'ok': ok, 'result': res} if ok else {'ok': ok, 'error': res})
+            return
+        if path in ('/api/public-revoke', '/public-revoke'):
+            self._json(200, public_revoke(body.get('slug', ''), self._owner()))
+            return
+        if path in ('/api/public-set-expiry', '/public-set-expiry'):
+            self._json(200, public_set_expiry(body.get('slug', ''), self._owner(), body.get('ttl_hours')))
+            return
+        if path in ('/api/public-set-indexed', '/public-set-indexed'):
+            self._json(200, public_set_indexed(body.get('slug', ''), self._owner(), bool(body.get('indexed'))))
+            return
+        if path in ('/api/upload-image', '/upload-image'):
+            ok, res = save_uploaded_image(body.get('image', ''))
+            self._json(200 if ok else 400, {'ok': ok, **res} if ok else {'ok': ok, 'error': res})
+            return
+        if path in ('/api/upload-file', '/upload-file', '/api/upload-share', '/upload-share'):
+            destination = ROOT if path.endswith('/upload-share') else None
+            ok, res = save_uploaded_file(body.get('name', ''), body.get('data', ''), destination)
+            self._json(200 if ok else 400, {'ok': ok, **res} if ok else {'ok': ok, 'error': res})
+            return
+        self._json(404, {'ok': False, 'error': f'unknown path: {path}'})
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write(f'[stationdesk-publish] {self.address_string()} - {fmt % args}\n')
+
+
+def cleanup_periodically(stop):
+    """Keep upload/public expiry active even when nobody visits the manager."""
+    while not stop.is_set():
+        try:
+            cleanup_old_uploads()
+            _local_sweep_only()
+            ingest_views()
+        except Exception as error:
+            sys.stderr.write(f'[stationdesk-publish] cleanup failed: {error}\n')
+        stop.wait(60)
+
+
+def main():
+    if '--cleanup' in sys.argv:                    # systemd timer entry — TTL sweep without a page visit
+        expired = _local_sweep_only()
+        print(f'[stationdesk-publish] cleanup removed {cleanup_old_uploads()} upload(s), '
+              f'{len(expired)} expired public snapshot(s)', flush=True)
+        return
+    if PUBLIC_DISABLED_REASON:
+        sys.stderr.write(f'[stationdesk-publish] external publish DISABLED — {PUBLIC_DISABLED_REASON}\n')
+    where = PUBLIC_DIR if PUBLIC_MODE == 'local' else INGEST_URL
+    print(f'[stationdesk-publish] root={ROOT} uploads={UPLOADS} listen=127.0.0.1:{PORT} '
+          f'public={PUBLIC_ENABLED}({PUBLIC_MODE}{" " + where if PUBLIC_ENABLED and where else ""})', flush=True)
+    stop = threading.Event()
+    cleanup = threading.Thread(target=cleanup_periodically, args=(stop,), daemon=True)
+    cleanup.start()
+    try:
+        with ThreadingHTTPServer(('127.0.0.1', PORT), Handler) as server:
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+    finally:
+        stop.set()
+        cleanup.join(timeout=2)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,10 @@
+[Unit]
+Description=StationDesk publish manager
+[Service]
+EnvironmentFile=-/opt/stationdesk/state/publish/funnel.env
+EnvironmentFile=-/opt/stationdesk/state/publish.env
+ExecStart=/usr/bin/python3 /opt/stationdesk/apps/publish/server.py
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=default.target

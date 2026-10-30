@@ -1,0 +1,45 @@
+CADCraft
+Copyright (c) 2026 ArtCraft Team and the CADCraft contributors.
+Licensed under the MIT License or the Apache License, Version 2.0, at your option
+(LICENSE-MIT, LICENSE-APACHE).
+
+The ArtCraft name, wordmark and logos in docs/brand/ are trademarks of the ArtCraft Team. They are
+not open source and are not covered by the license above; their terms are in
+docs/brand/LICENSE-brand.txt.
+
+Third-party material
+
+Software dependencies are listed in WEB-Cargo.lock and CLI-Cargo.lock.
+CLI-THIRD-PARTY-LICENSES.txt and WEB-THIRD-PARTY-LICENSES.txt retain
+notices for their respective dependency sets. The web notices also include egui
+embedded fonts (Hack, Ubuntu, Noto Emoji and emoji-icon-font), under the
+license texts included there, including the Ubuntu Font Licence.
+One is under a weak-copyleft licence: the acadrust
+crate (DWG reading and writing, https://github.com/hakanaktt/acadrust) is licensed under the
+Mozilla Public License 2.0 and is used unmodified as a separate library (crates/dwg). Its source
+is available from crates.io and the repository above.
+
+
+The core CADCraft assets are original (icons, drafting font, hatch patterns and
+linetypes are drawn or defined in code). The per-file lists are in
+WEB-ATTRIBUTION.md and CLI-ATTRIBUTION.md. Builds made with
+the optional craft-fonts input (CRAFT_FONTS_DIR) embed the fonts listed in its ATTRIBUTION.md,
+each under the SIL Open Font License 1.1; CRAFT-FONTS-ATTRIBUTION.md and
+the included *-OFL.txt files retain their notices.
+The web build embeds BIZ UDPGothic Regular, Noto Sans Arabic and NanumGothic.
+The unmodified upstream CLI embeds Shippori Mincho Regular, BIZ UDPGothic Regular
+and Bold, BIZ UDMincho Regular, Noto Sans Arabic and Noto Sans Thai.
+Neither binary embeds the excluded Noto Sans CJK SC font.
+
+StationDesk distribution provenance and source/build instructions: ../web-bundle/README.md.
+The web build uses CADCraft e707ab4d7cc10102e550ad4c5bcecef1084a9baa.
+The CLI is extracted without modification from the upstream v0.6.2 Linux x86_64
+.deb (source 00c7613f1af3c73f7157fa91d9fe2635c6f23c06); it is not a StationDesk build.
+Its unmodified MPL-2.0 acadrust 0.6.3 source is available at
+https://crates.io/crates/acadrust/0.6.3 and
+https://static.crates.io/crates/acadrust/acadrust-0.6.3.crate.
+The web source lock uses acadrust 0.6.4:
+https://static.crates.io/crates/acadrust/acadrust-0.6.4.crate.
+
+CADCraft is an independent project and is not affiliated with, sponsored by or endorsed by
+Autodesk, Inc. AutoCAD and DWG are trademarks of Autodesk, Inc.

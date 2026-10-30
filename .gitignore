@@ -1,0 +1,8 @@
+/share/
+/state/
+/nginx/apps.d/
+/web/
+/runtime/
+__pycache__/
+
+/nginx/site.conf

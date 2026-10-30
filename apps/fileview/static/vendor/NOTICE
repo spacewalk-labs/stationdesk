@@ -1,0 +1,16 @@
+Fileview redistributed libraries and adapted CSS
+
+The original headers in the JavaScript files are retained.
+- highlight.js 11.11.1: BSD-3-Clause, LICENSE.highlight.js.
+  https://github.com/highlightjs/highlight.js/tree/11.11.1
+- marked 15.0.12: MIT, LICENSE.marked.
+  https://github.com/markedjs/marked/tree/v15.0.12
+- DOMPurify 3.4.8: upstream Apache-2.0 OR MPL-2.0; distributed here under
+  the Apache-2.0 option, whose full text is LICENSE.DOMPurify.
+  https://github.com/cure53/DOMPurify/tree/3.4.8
+- Markwand: MIT, LICENSE.Markwand; the prose/callout CSS structure in
+  ../tokens.css is adapted from https://github.com/givepro91/markwand.
+  The local CSS adaptations are StationDesk work under the root license.
+
+These upstream licenses apply to their respective material independently of
+StationDesk's AGPL-3.0 license.

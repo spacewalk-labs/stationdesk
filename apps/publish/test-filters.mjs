@@ -86,12 +86,13 @@ ctx.state.publicListState = 'unknown';
 pick('status', 'private'); assert.equal(names(), 'abcd');
 
 // Pagination
-assert.equal(ctx.PAGE_SIZE, 50);
-assert.equal([0, 1, 50, 51, 100, 101].map(ctx.pageCount).join(), '1,1,1,2,2,3');
-assert.equal([[0, 5], [1, 5], [9, 120], [3, 120], [-2, 120], [2, 0]].map(([p, n]) => ctx.clampPage(p, n)).join(), '1,1,3,3,1,1');
+assert.equal(ctx.PAGE_SIZE, 20);
+assert.equal([0, 1, 20, 21, 40, 41].map(ctx.pageCount).join(), '1,1,1,2,2,3');
+assert.equal([[0, 5], [1, 5], [9, 120], [3, 120], [-2, 120], [2, 0]].map(([p, n]) => ctx.clampPage(p, n)).join(), '1,1,6,3,1,1');
 const rows = Array.from({ length: 120 }, (_, i) => i);
-assert.deepEqual([1, 2, 3].map((p) => ctx.pageSlice(rows, p).length), [50, 50, 20]);
-assert.equal(ctx.pageSlice(rows, 3)[0], 100);
+assert.deepEqual([1, 2, 6].map((p) => ctx.pageSlice(rows, p).length), [20, 20, 20]);
+assert.equal(ctx.pageSlice(rows.slice(0, 32), 2).length, 12);
+assert.equal(ctx.pageSlice(rows, 3)[0], 40);
 assert.equal(ctx.pageSlice(rows, 9)[0], 100);   // past the end clamps to the last page
 assert.equal(ctx.pageSlice([], 4).length, 0);
 const pi = (p, n) => ctx.pagerItems(p, n).map((x) => x || '…').join(' ');

@@ -8,6 +8,12 @@ The document listener remains `:8000`; removing the app preserves shared data.
 Uploads from the Publish manager are stored in the shared directory and appear in
 its list. Card uploads are temporary files in `~/uploads`, cleaned after 24 hours.
 
+The `/share-docs` tip above the document list explains how to ask Claude Code or
+Codex to create and share a document. It opens on the first visit and remembers
+its open/closed state in that browser. The list uses compact rows and 20 documents
+per page; search, filters and sorting return to the first page. External links
+whose source is missing remain manageable after the last page's source items.
+
 Views: the `:8000` listener logs each document request to `state/publish/views.log`
 (not assets or the root listing); the app counts 200/304 requests from browsers
 (not curl, bots, HeadlessChrome) into `state/publish/views.json`, shown per row and usable

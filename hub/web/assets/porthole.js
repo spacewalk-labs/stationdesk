@@ -384,6 +384,7 @@
       } else anchorFloatDefault();
     }
     positionPeek();
+    positionMenu();
   }
   window.addEventListener("resize", refreshPlacement);
   window.addEventListener("stationdesk:layout-changed", refreshPlacement);
@@ -423,8 +424,20 @@
       })
       .catch(function () { alertInfo = null; alertLevel = ""; paintRing(); renderAccounts(); });
   }
-  var menuEl = null, modalEl = null;
-  function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
+  var menuEl = null, modalEl = null, menuSizeObserver = null;
+  function closeMenu() {
+    if (menuSizeObserver) { menuSizeObserver.disconnect(); menuSizeObserver = null; }
+    if (menuEl) { menuEl.remove(); menuEl = null; }
+  }
+  function positionMenu() {
+    if (!menuEl) return;
+    var r = btn.getBoundingClientRect(), mh = menuEl.offsetHeight, mw = menuEl.offsetWidth;
+    var top = r.bottom + 8, left = r.left;
+    if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 8);
+    if (left + mw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - mw - 8);
+    menuEl.style.top = top + "px";
+    menuEl.style.left = left + "px";
+  }
   function closeModal() { if (modalEl) { modalEl.remove(); modalEl = null; pollAlert(); } }
   function menuRow(label, sub, onClick) {
     var b = document.createElement("button");
@@ -594,7 +607,7 @@
     var m = document.createElement("div");
     m.style.cssText = "position:fixed;z-index:2147483100;width:min(360px,calc(100vw - 16px));background:#263244;" +
       "border:1px solid #465366;border-radius:14px;box-shadow:0 10px 20px -5px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.08);" +
-      "padding:5px 0;overflow:hidden;box-sizing:border-box;";
+      "padding:5px 0;max-height:calc(100dvh - 16px);overflow-y:auto;box-sizing:border-box;";
     m.appendChild(menuRow(t("Go to StationDesk", "StationDesk 홈"), "", function () { closeMenu(); go(); }));
     m.appendChild(menuRow(t("Inbox · " + unreadCount + " unread", "받은 메시지 · 안 읽음 " + unreadCount), "", openInbox));
     accountsEl = null;
@@ -629,13 +642,11 @@
       }));
     }
     (document.body || document.documentElement).appendChild(m);
-    var r = btn.getBoundingClientRect(), mh = m.offsetHeight, mw = m.offsetWidth;
-    var top = r.bottom + 8, left = r.left;
-    if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 8);
-    if (left + mw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - mw - 8);
-    m.style.top = top + "px";
-    m.style.left = left + "px";
     menuEl = m;
+    positionMenu();
+    // Account polling and translated text can change the open menu's size.
+    menuSizeObserver = new ResizeObserver(positionMenu);
+    menuSizeObserver.observe(m);
     setTimeout(function () {              // not in this same click
       document.addEventListener("pointerdown", onDocDown, true);
     }, 0);

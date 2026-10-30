@@ -229,5 +229,47 @@ class AccountsBrowserTests(unittest.TestCase):
             browser.close()
 
 
+    def test_delayed_account_status_keeps_the_open_menu_and_last_action_reachable(self):
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=['--no-sandbox'])
+            page = browser.new_page(viewport={'width': 390, 'height': 844})
+            pending = []
+            source = (WEB / 'assets/porthole.js').read_bytes()
+            def route(request):
+                path = request.request.url.split('://', 1)[1].split('/', 1)[1]
+                if path == 'accounts/status.json':
+                    pending.append(request)
+                elif path == 'assets/porthole.js':
+                    request.fulfill(body=source, content_type='application/javascript; charset=utf-8')
+                else:
+                    request.fulfill(body='<body><script src="/assets/porthole.js"></script></body>'
+                                    if path == '' else '<body></body>', content_type='text/html')
+            page.route('**/*', route)
+            page.goto('https://station.test/')
+            page.click('#stationdesk-porthole')
+            secret = page.get_by_text('Secret drop', exact=True)
+            menu = secret.locator('../..')
+            before = menu.bounding_box()['height']
+            for request in pending:
+                request.fulfill(json=status())
+            page.get_by_text('Claude Code', exact=True).wait_for()
+            page.wait_for_function("""() => {
+                const button = [...document.querySelectorAll('button')].find(b => b.textContent.startsWith('Secret drop'));
+                return button && button.parentElement.getBoundingClientRect().bottom <= innerHeight - 8;
+            }""")
+            self.assertGreater(menu.bounding_box()['height'], before)
+            self.assertLessEqual(secret.bounding_box()['y'] + secret.bounding_box()['height'], 844 - 8)
+            self.shot(page, 'porthole-delayed-status')
+            page.set_viewport_size({'width':390, 'height':320})
+            page.wait_for_function("""() => {
+                const button = [...document.querySelectorAll('button')].find(b => b.textContent.startsWith('Secret drop'));
+                return button.parentElement.getBoundingClientRect().bottom <= 312;
+            }""")
+            self.assertGreater(menu.evaluate('e => e.scrollHeight'), menu.evaluate('e => e.clientHeight'))
+            secret.click()
+            self.assertEqual(1, page.locator('iframe[src*="devterm/?secret=1"]').count())
+            browser.close()
+
+
 if __name__ == '__main__':
     unittest.main()

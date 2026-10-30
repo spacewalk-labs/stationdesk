@@ -302,6 +302,56 @@
     .acts { width: 100%; justify-content: flex-start; padding-left: 29px; }
   }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
+
+  .skill-tip { margin: 0 0 1.25rem; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
+  .skill-tip > summary { display: flex; align-items: center; gap: 12px; padding: 17px 22px; cursor: pointer; list-style: none; font-size: .9rem; }
+  .skill-tip > summary::-webkit-details-marker { display: none; }
+  .skill-tip > summary code { flex: none; font-size: .82rem; font-weight: 600; }
+  .skill-tip > summary span { flex: 1; }
+  .skill-tip > summary::after { content: "⌄"; color: var(--muted); }
+  .skill-tip[open] > summary::after { transform: rotate(180deg); }
+  .skill-tip > summary:focus-visible { outline: 2px solid var(--stationdesk-accent); outline-offset: 3px; border-radius: 16px; }
+  .skill-body { padding: 0 22px 20px; font-size: .88rem; }
+  .skill-body p { margin: 0 0 12px; }
+  .skill-shared, .skill-scope { color: var(--muted); font-size: .82rem; }
+  .skill-request { display: flex; align-items: center; gap: 18px; padding-top: 16px; margin: 16px 0; border-top: 1px solid var(--line); }
+  .skill-request p { flex: 1; margin: 0; }
+  .skill-request .btn { flex: none; }
+  .skill-how { font-weight: 600; }
+  .skill-body ol { padding-left: 20px; color: var(--muted); line-height: 1.8; }
+  .skill-body .skill-scope { margin: 0; }
+  .row { flex-wrap: nowrap; align-items: center; gap: 10px; padding: 8px 14px; min-height: 60px; }
+  .rowchk { margin-top: 0; }
+  .nameline { gap: 4px 6px; }
+  .doctitle { min-width: 0; flex: 1 1 140px; font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { display: flex; align-items: baseline; min-width: 0; margin-top: 1px; font-size: .75rem; line-height: 1.5; }
+  .meta > span { flex: none; }
+  .meta > span + span::before { content: " · "; white-space: pre; }
+  .meta > .fname { flex: 0 1 auto; min-width: 0; }
+  .fname { display: inline-block; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+  .acts { flex-wrap: nowrap; gap: 6px; }
+  .rowmore { min-width: 36px; }
+  .confirm { justify-content: flex-end; max-width: 250px; }
+  .pager button { min-width: 40px; min-height: 40px; color: var(--text); }
+  @media (max-width: 640px) {
+    .skill-tip > summary { padding: 16px; gap: 10px; align-items: flex-start; font-size: .82rem; }
+    .skill-body { padding: 0 16px 18px; }
+    .skill-request { flex-direction: column; align-items: flex-start; gap: 12px; }
+    .row { padding: 8px 10px; gap: 8px; }
+    .row .acts { width: auto; padding-left: 0; }
+    .row .btn, .pager button { min-width: 44px; min-height: 44px; }
+    .row .btn { padding-inline: 8px; }
+    .row .main { overflow-wrap: anywhere; }
+    .fname { max-width: 100%; }
+    .confirm { max-width: 96px; }
+    .confirm .cinput { width: 96px; max-width: 100%; }
+    .row .meta-size, .row .meta-project { display: none; }
+    .head-row { flex-wrap: wrap; gap: 12px; }
+    .head-row .grow { flex: 1 1 120px; order: 1; }
+    .head-row #settings { order: 2; margin-left: auto; }
+    .head-row .tabs { order: 3; flex: 1 1 100%; }
+    .filterbar .facets, .filterbar .activebar { grid-column: 1 / -1; }
+  }
 </style>
 </head>
 <body>
@@ -318,6 +368,25 @@
     </div>
     <button class="btn" id="settings">Settings</button>
   </header>
+
+  <details class="skill-tip" id="share-docs-tip" open>
+    <summary><code>/share-docs</code><span>Create and share documents with your agent</span></summary>
+    <div class="skill-body">
+      <p class="skill-shared">One skill for Claude Code and Codex</p>
+      <p>Ask your agent to turn a discussion, report, or plan into a readable document and share its link. Manage the documents here in Publish.</p>
+      <div class="skill-request">
+        <p id="share-docs-request">/share-docs Turn our discussion into a visual guide and share the link.</p>
+        <button class="btn primary" id="share-docs-copy">Copy request</button>
+      </div>
+      <p class="skill-how">How to use it</p>
+      <ol>
+        <li>Copy the request and paste it into Claude Code or Codex on this StationDesk.</li>
+        <li>Tell your agent what to explain and who will read it.</li>
+        <li>Open the link your agent returns. Find and manage the document here.</li>
+      </ol>
+      <p class="skill-scope">An internal link follows this StationDesk’s access settings. To share outside your tailnet, use the document’s Share menu and choose an access method and expiry.</p>
+    </div>
+  </details>
 
   <div class="notice">
     <strong>Unpublishing removes only the symlink — the original file is preserved.</strong>
@@ -357,7 +426,7 @@
   </div>
 
   <div class="list" id="list"></div>
-  <div class="pager" id="pager" hidden></div>
+  <nav class="pager" id="pager" aria-label="Document pages" hidden></nav>
   <div class="empty" id="empty" hidden>No published items.</div>
 </div>
 
@@ -510,6 +579,16 @@ function copyText(text) {
 function copyAndToast(text) {
   copyText(text).then(function (ok) { toast(ok ? "Copied to clipboard" : "Copy failed — select and copy manually"); });
 }
+
+var shareDocsTip = $("#share-docs-tip");
+var shareDocsTipKey = "stationdesk.publish.share-docs-tip";
+try { shareDocsTip.open = localStorage.getItem(shareDocsTipKey) !== "closed"; } catch (_) {}
+shareDocsTip.addEventListener("toggle", function () {
+  try { localStorage.setItem(shareDocsTipKey, shareDocsTip.open ? "open" : "closed"); } catch (_) {}
+});
+$("#share-docs-copy").addEventListener("click", function () {
+  copyAndToast($("#share-docs-request").textContent);
+});
 
 // ---- api ----
 function apiGet(path) {
@@ -689,12 +768,13 @@ function rowHTML(it) {
   var docURL = state.docURL ? state.docURL + "/" + encodeURIComponent(it.name) : "";
   var fileURL = docURL || "/publish/files/" + encodeURIComponent(it.name);
   var pub = state.pubBySrc[it.name];
-  var meta = '<span class="fname">' + hl(it.name) + "</span> · "
-           + '<span title="' + esc(it.mtime) + '">' + esc(relTime(it.mtime_epoch)) + "</span> · " + esc(it.size)
-           + (it.views ? ' · <span title="' + (it.last_view ? "last " + esc(relTime(it.last_view)) : "") + '">' + it.views + (it.views === 1 ? " view" : " views") + "</span>" : "")
-           + ' · <span class="proj">' + hl(projectOf(it)) + "</span>"
+  var meta = '<span class="fname" title="' + esc(it.name) + '">' + hl(it.name) + "</span>"
+           + '<span class="meta-time" title="' + esc(it.mtime) + '">' + esc(relTime(it.mtime_epoch)) + "</span>"
+           + '<span class="meta-size">' + esc(it.size) + "</span>"
+           + (it.views ? '<span class="meta-views" title="' + (it.last_view ? "last " + esc(relTime(it.last_view)) : "") + '">' + it.views + (it.views === 1 ? " view" : " views") + "</span>" : "")
+           + '<span class="meta-project proj">' + hl(projectOf(it)) + "</span>"
            + (it.isLink ? "" : ' <span class="tag">file</span>')
-           + (it.isBroken ? ' · <span style="color:var(--danger)">broken link</span>' : "");
+           + (it.isBroken ? '<span class="meta-broken" style="color:var(--danger)">broken link</span>' : "");
   var target = "";
 
   var acts = "";
@@ -719,7 +799,7 @@ function rowHTML(it) {
     + '<input type="checkbox" class="rowchk" data-name="' + esc(it.name) + '"' + checked + ' aria-label="select ' + esc(it.name) + '">'
     + '<div class="main">'
     +   '<div class="nameline"><span class="icon">' + iconFor(it) + "</span>"
-    +     '<a class="doctitle" href="' + fileURL + '" target="_blank" rel="noopener">' + hl(it.title || it.name) + "</a>"
+    +     '<a class="doctitle" title="' + esc(it.title || it.name) + '" href="' + fileURL + '" target="_blank" rel="noopener">' + hl(it.title || it.name) + "</a>"
     +     pubChips(it)
     +     "</div>"
     +   '<div class="meta">' + meta + "</div>" + target
@@ -809,7 +889,7 @@ function hl(text) {
 }
 
 // Pagination: only the current page of the filtered rows is drawn.
-var PAGE_SIZE = 50;
+var PAGE_SIZE = 20;
 function pageCount(n) { return Math.max(1, Math.ceil(n / PAGE_SIZE)); }
 function clampPage(page, n) { return Math.min(Math.max(1, page | 0), pageCount(n)); }
 function pageSlice(rows, page) { var p = clampPage(page, rows.length); return rows.slice((p - 1) * PAGE_SIZE, p * PAGE_SIZE); }
@@ -876,7 +956,10 @@ function render() {
   // While the public list reloads the public tab is briefly empty; draw page 1 but keep the remembered page.
   var page = clampPage(state.page, rows.length), pages = pageCount(rows.length), pageRows = pageSlice(rows, page);
   if (!(state.view === "public" && state.publicListState === "loading")) state.page = page;
-  $("#count").textContent = rows.length + " of " + state.items.length;
+  $("#count").textContent = rows.length
+    ? ((page - 1) * PAGE_SIZE + 1) + "–" + Math.min(page * PAGE_SIZE, rows.length) + " of " + rows.length
+      + (rows.length !== state.items.length ? " (" + state.items.length + " total)" : "")
+    : "0 of " + state.items.length;
 
   var pubs = keys(state.pubBySrc).map(function (k) { return state.pubBySrc[k]; });
   $("#pub-count").textContent = pubs.length;
@@ -923,6 +1006,7 @@ $("#pager").addEventListener("click", function (ev) {
   if (!b || b.disabled) return;
   state.page = parseInt(b.dataset.p, 10);
   render();
+  $('#pager button[aria-current="page"]').focus({ preventScroll: true });
   window.scrollTo(0, $("#list").getBoundingClientRect().top + window.scrollY - 80);
 });
 

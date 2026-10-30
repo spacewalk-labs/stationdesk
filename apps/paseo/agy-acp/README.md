@@ -122,45 +122,39 @@ operator's own, differently configured — is left alone.
 
 ## Installing
 
-`install.sh`, config-gated (`agy = true` under `[apps.paseo]` in
-`StationDesk app configuration`) and warn-only, called from `../install.sh` **before** that
-script's own daemon restart decision (not after, alongside
-`browse-host` — a same-process sidecar with no such coupling). Registering a
-provider means writing `agents.providers.agy` into `config.json`, which only
-takes effect the next time the daemon reads it at startup; written after the
-restart it would sit unread until some unrelated later one. `install.sh`
-exits `2` (not `0`) when it actually wrote a change, and the caller folds
-that into its own restart decision — see the comment at the call site in
-`../install.sh`.
+The Paseo installer enables this adapter and stops if its build or provider
+configuration fails. Running this directory's `install.sh` on its own requires
+`STATIONDESK_PASEO_AGY=true`. It returns 2 when it changes configuration, so its
+caller can account for a required daemon restart.
 
-It never runs `npm install -g`: the fork is staged and built under
-`$HOME/.local/share/agy-acp` (LICENSE included), then referenced from
-`config.json` by absolute path — same pattern as `../browse-host/install.sh`.
-The real `agy` binary itself is resolved by the fork's own `src/binary.ts`
-(`resolveAgy()`) at launch time, following `AGY_PATH`, `~/.gemini/bin/agy`,
-`~/.local/bin/agy`, then `PATH`, downloading only as a last resort — this
-installer never reads or copies
-`~/.gemini/antigravity-cli/antigravity-oauth-token`.
+The adapter is staged and built under `$STATIONDESK_ROOT/runtime/agy-acp`,
+then registered by absolute path in `~/.paseo/config.json`. It does not use
+`npm install -g`. The real `agy` binary is resolved at launch by `src/binary.ts`
+through `AGY_PATH`, `~/.gemini/bin/agy`, `~/.local/bin/agy`, then `PATH`, with
+verified downloading as a last resort. The installer does not copy provider
+OAuth credentials.
 
 ## Testing
 
-- `npm test` (or `install/test-agy-acp.sh`) — unit tests
-  (`tests/agy-session*.test.mjs`, `tests/acp-agent.test.mjs`,
-  `tests/binary.test.mjs` — the digest-required-or-refuse download path) plus
-  the "fake-agy matrix" (`tests/fake-agy-matrix.test.mjs`): `AntigravityAcpAgent`
-  driven through the real ACP protocol (in-process, via the SDK's
-  client↔agent direct connection) against `tests/fixtures/fake-agy.mjs`, an
-  offline stand-in shaped after real agy 1.2.3's observed timing and
-  behavior. No real `agy` binary, no real Paseo daemon, no network beyond
-  `npm ci` for this package's own two runtime dependencies.
-- `install/test-agy-acp-daemon.sh` — the same fork driven through a real,
-  isolated Paseo 0.2.5 daemon (own scratch `$HOME`, own port, fake-agy again
-  standing in for `agy`), proving the interrupt/respawn fix survives Paseo's
-  own ACP client and a daemon restart mid-conversation.
-- `install/test-agy-acp-install.sh` — `install.sh` itself: the config gate,
-  the build, and `configure-agy-acp.py`'s idempotent
-  `config.json`/`skills.json` writes (including that a pre-existing
-  `config.json` with other providers is preserved, not overwritten).
+In a disposable environment, from this directory:
+
+```sh
+npm ci
+npm run build
+npm test
+```
+
+The tests include session, ACP and binary-resolution unit tests and the
+fake-agy matrix (`tests/fake-agy-matrix.test.mjs`). That matrix drives the real
+ACP SDK connection against `tests/fixtures/fake-agy.mjs`, an offline stand-in
+based on observed agy 1.2.3 timing and behavior. It uses no real agy binary or
+Paseo daemon; dependency installation still needs the network.
+
+Earlier validation records also named `install/test-agy-acp.sh`,
+`install/test-agy-acp-daemon.sh` (an isolated Paseo 0.2.5 daemon with fake agy)
+and `install/test-agy-acp-install.sh` (installer/configuration checks).
+Those historical harnesses are not included in this public tree; the commands
+above run the tests that are present here.
 
 ## Known limitations
 
@@ -168,14 +162,12 @@ installer never reads or copies
   `mcpServers` parameter is received but not forwarded — there is no evidence
   in any capture this fork is built from that agy's CLI accepts an MCP server
   list at all. Wiring one up needs confirming against a real `agy
-  --help`/docs first (an unverified flag risks a silent behavior change worse
-  than the current gap). Paseo's own MCP tools (`list`/`send`/`create`/
-  `archive` agents, `browser_*`) are unaffected — they run through Paseo's
-  daemon-side MCP endpoint regardless of provider.
+  --help`/docs first. Paseo serves its own MCP tools at the daemon endpoint,
+  but this adapter's tests do not establish that agy can use those tools.
 - **The transcript cache has no TTL or size cap.** `~/.cache/google-antigravity-acp/sessions/`
   grows by one `.jsonl` (+ optionally one `.meta.json`) per session; the only
-  cleanup path today is an explicit `session/delete` (which this fork does
-  implement — see above). A TTL or cap is out of this fork's own scope; it is
+  cleanup path today is an explicit `session/delete` (implemented by this fork).
+  A TTL or cap is out of this fork's own scope; it is
   not ledger/snapshot-tracked either, by the same "retained data" precedent
   `~/.paseo/config.json` itself already sets — see `apps/paseo/app.toml` and the retained `~/.paseo` runtime data.
 - **"Child seat does not inherit bypass" is proven on this fork's own half
@@ -184,6 +176,5 @@ installer never reads or copies
   `_meta.paseo.isUnattended` tag — the only signal this fork emits toward
   Paseo's own cross-provider default-mode propagation
   (`create-agent-mode.js`). It does not exercise that Paseo-side logic itself
-  (owned by C2's patches, and needs the 0.8.0 server this fork's tests do not
-  vendor) — a real agy-parent-creates-Claude-child regression test belongs to
-  C2.5's combined-revision suite.
+  or a real agy-parent-creates-Claude-child interaction. The adapter test alone
+  does not establish cross-provider permission inheritance in the deployed daemon.

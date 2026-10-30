@@ -1,8 +1,8 @@
-# orca — browser Orca ADE behind the StationDesk owner gate
+# Orca
 
-One browser tab attaches to this box's [**Orca ADE**](https://github.com/stablyai/orca)
-(a git-worktree parallel-agent IDE) — **no local install**. Authentication is your
-**Tailscale identity** (no password); the box **owner only** may enter.
+Open this machine's [Orca ADE](https://github.com/stablyai/orca) in a browser
+to work with Git worktrees, terminals and parallel agents. The browser device
+needs Tailscale signed in as the workspace owner; it needs no Orca installation.
 
 ```
 browser ──https/WireGuard──▶ tailscale serve :19940
@@ -32,7 +32,7 @@ restarts. nginx serves it at `/orca-web/` and 302-redirects the vendor client UR
 Provenance, patch summary, and how to refresh the bundle: `web-bundle/README.md`.
 `bin/verify-web-bundle.sh` checks the bundle against `web-bundle/VERSION` before install.
 
-**Zero-paste entry.** The launcher opens the gate root (`https://<box>:19940/`). A
+**Open without copying a pairing code.** The launcher opens the gate root (`https://<box>:19940/`). A
 document navigation there is 302-redirected to the patched client carrying the runtime
 pairing, so opening Orca lands directly in the workbench with no pairing paste. A
 WebSocket upgrade to `/` (the runtime RPC) is proxied to the backend instead. The pairing
@@ -50,7 +50,8 @@ public operations (loopback port 18929) for a separately installed sidecar.
 
 `orca serve` has **no `--host` flag**, so it binds `0.0.0.0`. `guard.sh` (run by
 `stationdesk-orca-guard.service`) loads an nft table that drops non-loopback traffic to
-the backend port, so the **only** route in is `tailscale serve` → the nginx owner gate.
+the backend port. Remote browser access goes through `tailscale serve` and
+the nginx owner gate.
 The same unit loads an AppArmor profile that lets Electron's sandbox open its user
 namespace on Ubuntu 24.04 (`kernel.apparmor_restrict_unprivileged_userns=1`). Both are
 applied when the unit starts (boot included) and removed when it stops, so removing the

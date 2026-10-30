@@ -1,6 +1,6 @@
 # Publish
 
-StationDesk ports the Airlock share manager: uploads, search/filter/sort,
+Publish provides uploads, search/filter/sort,
 symlink unpublish, confirmed direct-file deletion, batch operations, broken-link
 repair, and external HTML snapshots (open/password protected, duration, revoke,
 refresh, linked-document bundles). The manager is owner-only at `/publish/`.
@@ -22,7 +22,7 @@ configured in `state/publish.env`. Snapshots are served at
 falls back to `:8443` when 10000 is taken and never uses 443, which is the hub. Funnel
 exposes only the dedicated snapshot directories under `state/publish/` (never the private
 share directory), directory listings are 404, and search engines are told not to index
-(`X-Robots-Tag: noindex`, `robots.txt` disallow-all). This is the one place StationDesk
+(`X-Robots-Tag: noindex, nofollow` by default; see the per-page switch below). This is the one place StationDesk
 makes something reachable from the public internet; it is limited to documents you
 publish, and removing the app retires the mapping. If the tailnet policy does not grant
 this machine the `funnel` attribute, install still succeeds and the Publish page says so
@@ -73,10 +73,10 @@ ready to copy; nothing is automated.
 
 Expiry and upload cleanup run at startup and every 60 seconds without a browser
 visit. `python3 server.py --cleanup` runs the same cleanup once. A snapshot can
-remain accessible until the next sweep, as with the original periodic cleanup.
+remain accessible until the next sweep.
 The manager's mutations require the owner identity and an Origin matching Host.
 
-Run `python3 -m unittest discover product/tests -p 'test_publish*.py'` from the
-repository root and `node product/apps/publish/test-bundle-plan-state.mjs` for
-regressions. Live API/nginx checks belong in disposable LXD only:
-`scripts/port-publish-check.py` and `scripts/port-publish-remote-check.py`.
+From the public repository root, run
+`python3 -m unittest discover tests -p 'test_publish*.py'` and
+`node apps/publish/test-bundle-plan-state.mjs` for regressions. Run live
+API/nginx installation checks only in a disposable environment.

@@ -1,4 +1,4 @@
-# orca web-bundle — the patched Orca web client (vendored)
+# Orca web bundle
 
 `dist/` is the **built** Orca web client that StationDesk serves at `/orca-web/` behind
 the owner gate, in place of the raw client that `orca serve` ships. `../nginx/serve.conf`
@@ -25,19 +25,11 @@ Orca web client (MIT) plus local patches (also MIT); see `LICENSE` and `licenses
 
 ## Integrity: VERSION + verify-web-bundle.sh
 
-`VERSION` pins what this build *is*: the upstream AppImage version it pairs with, the entry
-asset name, the file count and a sha256 over the whole tree. A build carries no version
-string inside it, so without that file neither "is this stale?" nor "did this get corrupted
-in transit?" can be answered.
-
-`../bin/verify-web-bundle.sh` checks `dist/` against the pin, and `../install.sh` runs it
-before serving. This matters because of *how* a broken bundle fails: a partial clone or a
-truncated copy still serves 200s and then renders a blank page, so nothing looks wrong.
-Verifying up front turns that into a failed install.
-
-It does **not** rebuild — re-deriving the client needs the upstream source and toolchain,
-which this repo deliberately does not vendor. When you do re-derive `dist/`, regenerate
-every field in `VERSION` in the same commit; a stale pin is worse than no pin.
+`VERSION` records the matching upstream AppImage version, entry asset, file
+count and SHA-256 of the complete tree. `../install.sh` runs
+`../bin/verify-web-bundle.sh` against that pin before serving the bundle.
+The check detects incomplete or changed files; it does not rebuild the client.
+When replacing `dist/`, update every `VERSION` field in the same change.
 
 ## Bundled text
 
@@ -78,11 +70,11 @@ for the return-widget injection. The supplied verifier checks the tree pin.
 ## Optional local-browser services
 
 Local browser render (slot manager + external proxy pool) and grab (a page-injected
-bridge) need extra services this repo does not install. The client degrades gracefully
-without them. An independently installed slot manager listens on loopback port 18929;
+bridge) need extra services this repo does not install. Without them, it uses
+the fallback behavior described above. An independently installed slot manager
+listens on loopback port 18929;
 its configuration lives at `/opt/orca-web/orca-local-browse.json`. The Orca gate exposes
 that file and the manager's five public operations under `/orca-web/`, for the owner
 only. Internal manager endpoints remain inaccessible through this route.
 
-StationDesk already owns the patched client and its gate. A sidecar installer need not
-replace that bundle or install a second legacy canary gate.
+Sidecar integrations use the existing owner-gated routes.

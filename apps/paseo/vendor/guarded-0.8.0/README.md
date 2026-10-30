@@ -8,20 +8,26 @@ the modified `@getpaseo` packages as one version-consistent set.
 - License: Apache-2.0 (upstream, since `v0.7`) for the unmodified portions; our own
   overlay is licensed AGPL-3.0-only by our own choice — see `LICENSE` (our AGPL-3.0
   text) and `UPSTREAM-LICENSE` (upstream's Apache-2.0 text) beside this file, and
-  `../../patches/README.md` for the full reasoning.
+  [the patch inventory](../../patches/README.md).
 
 The installer verifies `SHA256SUMS` before changing the npm prefix and records
 the checksum-file digest as the installed identity. A changed digest reinstalls
 the seven local tarballs even when their version remains `0.8.0`; npm replaces
 the installed package bytes, including removed overlays. `INSTALLED_SHA256SUMS`
-pins the overlaid files for the bundle verification suites. An explicit
-`[apps.paseo].version` override selects the ordinary npm registry path instead.
+pins the overlaid files for bundle verification. The installer uses these
+archives rather than a configurable registry version. Current source and rebuild
+instructions are in [source/README.md](source/README.md).
 
-## What is overlaid, and why
+## Overlay history and source
+
+The following notes preserve the bundle's development and earlier deployment
+validation records. Dated measurements and test totals describe those runs;
+they are not a new verification of every historical claim.
+An earlier fork commit recorded below is historical provenance, not a required
+build input; the rebuild uses the pinned public upstream source and included patches.
 
 The 0.2.5 predecessor of this bundle carried a never-upstreamed fork PR
-(`6d13dd8e042de1120ff63ac19c0d690d0ad7c32e` on top of merge-base `6fc491e6220fba
-6543bbbe4bf1b1f58cfe59228b`) adding three protections beyond stock Paseo: an MCP
+(`6d13dd8e042de1120ff63ac19c0d690d0ad7c32e` on top of merge-base `6fc491e6220fba6543bbbe4bf1b1f58cfe59228b`) adding three protections beyond stock Paseo: an MCP
 fix so archived sessions stop appearing live, an atomic guard on agent-message
 send (`agentMessageSendGuard`), and exact schedule pause/resume state restore
 (`scheduleStateRestore`). Comparing that fork commit against the real `v0.8.0`
@@ -44,7 +50,7 @@ tag via the GitHub compare API (718 commits apart, never merged) showed:
   source was reconstructed from the shipped guard output and declarations,
   then checked with a fresh strict build, AST comparison and behavior tests.
 
-The server archive overlays this branch's own build output for the eight
+The server archive overlays the reconstructed guard build output for the eight
 `@getpaseo/server` files the port actually touches (`agent/agent-manager.js`,
 `agent/agent-prompt.js`, `authorization/operation-permissions.js`,
 `schedule/service.js`, `schedule/store.js`,
@@ -69,7 +75,7 @@ isDefault: index === 0)`), so the fix now reorders the assembled
 `buildOpenCodeModelDefinition` and driving it with a mock grok-4.6 model
 (`defaultThinkingOptionId` came back `"high"` as intended).
 
-`opencode-grok-defaults` was re-baked again (C2.6, 2026-09-16) to put
+`opencode-grok-defaults` was re-baked again (2026-09-16, first revision) to put
 `opencode-go/muse-spark-1.3-contributor` first in the picker (ahead of
 `xai/grok-4.6`, then `xai/grok-build-0.1`) and default its thinking to `max`
 via the same reorder mechanism as grok-4.6's `high`. `max` is not in the
@@ -82,12 +88,12 @@ patches below: the sentinel text did not change, so the already-baked file
 already satisfied the old patcher's `already applied` check — only replacing
 the vendored bytes actually ships the new order.
 
-`opencode-grok-defaults` was re-baked once more (C2.6b, 2026-09-16): the
+`opencode-grok-defaults` was re-baked once more (2026-09-16, corrected revision): the
 muse-spark thinking default is `xhigh`, not `max`. Measured on the box, the
 `max` variant (a box-local `opencode.jsonc` invention — the models.dev catalog
 stops at `xhigh`) is rejected by the provider
 (`invalid_request_error: The request contains invalid parameters`), so the
-C2.6 default broke effort changes in Paseo. Same reorder mechanism, same
+first revision's default broke effort changes in Paseo. Same reorder mechanism, same
 idempotency reason (sentinel still unchanged), same no-op property on boxes
 without `opencode-go`/muse-spark.
 
@@ -291,24 +297,19 @@ The installer still calls the patcher and sees `ALREADY`. Only those three membe
 changed; both checksum files were regenerated. The daemon restarts once because the
 bundle identity changed.
 
-The web-ui patcher (`browse-host/bin/patch-web-ui.js`) is re-derived for
-0.8.0 — all 10 anchors updated (the bundle's persistence layer alone moved
-from `createJSONStorage` to a validated wrapper,
-`createValidatedPersistStorage`, confirmed against upstream source) and
-verified against the real extracted 0.8.0 web-ui bundle: both
-`--subagent-stream` and `--browse` apply cleanly, idempotently, with hashes
-matching `KNOWN_BUNDLE_SHAPES`. It is not baked into these tarballs — it
-patches the separately-shipped web-ui `dist` directory at install time, not
-`@getpaseo/server`'s own files — so `install.sh`'s two call sites
-(`apps/paseo/install.sh` for `--subagent-stream`,
-`apps/paseo/browse-host/install.sh` for `--browse`) still wrap it in
-`if ... then ... else warn ...` for defense in depth against a future bundle
-shape neither anchor set covers, per its own CLI's fail-loud design ("REFUSE
-(exit 1) rather than run an unpatched/half-patched build") — but a real
-end-to-end `bash apps/paseo/install.sh` run against this exact bundle takes
-the success branch on both, not the warning one.
+The web UI patcher's 0.8.0 port updated all ten original anchors, including
+persistence through `createValidatedPersistStorage`; its recorded validation
+covered both `--subagent-stream` and `--browse` against the extracted bundle.
+Known current shapes are listed in `KNOWN_BUNDLE_SHAPES` and the anchor manifest.
+These UI edits are applied to `@getpaseo/server/dist/server/web-ui` at install
+time; the npm archives retain the original UI build.
 
-Verification before vendoring: 76 new tests (guard e2e, schedule-restore e2e,
+Earlier validation notes described warning-only UI call sites. In the current
+installer, the server filter and `--subagent-stream` subscription edit are
+validated as a pair. `browse-host/install.sh` invokes `--browse` directly and
+propagates a failure to the Paseo installer.
+
+The original pre-vendoring validation record reported 76 new tests (guard e2e, schedule-restore e2e,
 store, service) plus a 359-test regression sweep of the directly-touched files
 (agent-manager, agent-prompt, session, websocket-server notifications,
 wire-compat) green under the upstream repo's own `vitest`, re-run independently
@@ -325,16 +326,15 @@ schedule-busy-pending-delivery, archive-consistency, codex-model-roster)
 idempotently, restarts the
 daemon, and installs successfully end to end.
 
-## StationDesk canonical latency fixes (2026-10-30)
+## Latency fixes (2026-10-30)
 
-The canonical input includes Airlock PR #992, commit
-`73f12457c8d347f997cd4980b13ef8a52a0fc01a`. The server tarball and both checksum
-manifests are identical to that reviewed deployment. Other package archives are
-unchanged. Only five server modules changed from the previous StationDesk input:
-the Git service, reconciliation service, GitHub service, AgentStorage, and
-AgentManager. AgentManager now includes the existing idle-unload and timeline
-replacement overlays that the installer already applied; its final installed
-checksum is unchanged.
+These runtime fixes were carried from an earlier deployment on 2026-10-30.
+That import changed five server modules: the Git service, reconciliation
+service, GitHub service, AgentStorage and AgentManager. AgentManager included
+the idle-unload and timeline-replacement overlays already applied by the
+installer. Public-release preparation later added license/source notices and
+regenerated the manifests; the current archive identities are in `SHA256SUMS`,
+and the complete shipped delta is in `source/distribution.patch`.
 
 `agent-storage-load-once` keeps the initial shared disk load, but returns directly
 on warm reads/writes instead of copying the full agent cache for each lookup.

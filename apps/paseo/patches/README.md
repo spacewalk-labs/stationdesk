@@ -1,7 +1,7 @@
 # paseo patches — AGPL-3.0-only (our own choice, on an Apache-2.0 base)
 
 `agent-history-delete-guard.mjs` refuses CLI permanent deletion before connecting
-or cancelling agents; see [automatic cleanup](../README.md#automatic-cleanup).
+or cancelling agents; see the [guard implementation](agent-history-delete-guard.mjs).
 
 **License: `AGPL-3.0-only`** — marked separately from the repo's own AGPL-3.0,
 because the basis is different (see below).

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>File Viewer</title>
   <meta name="apple-mobile-web-app-title" content="File Viewer">
-  <link rel="icon" type="image/svg+xml" href="/fileview/icon.svg">
+  <link rel="icon" type="image/svg+xml" href="/assets/app-icons/fileview.svg">
   <meta name="theme-color" media="(prefers-color-scheme: dark)"  content="#1F2937">
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F5F5F7">
   <meta name="fileview-home" content="">
@@ -28,13 +28,15 @@
       flex: 0 0 auto;
       display: flex; align-items: center; gap: var(--sp-1);
       padding: var(--sp-2) var(--sp-3);
-      padding-left: 56px;   /* reserve room for the corner return widget (top-left) */
       background: var(--chrome);
       border-bottom: 1px solid var(--border);
       font-size: var(--fs-sm);
       color: var(--text-muted);
     }
+    #ms-bar .ms-nav, #ms-bar .ms-file-actions, #ms-bar .ms-appearance { display: contents; }
+    #ms-bar .ms-app-icon { width: 28px; height: 28px; border-radius: 7px; flex: none; }
     #ms-bar .ms-brand {
+      display: inline-flex; align-items: center; gap: 8px;
       font-weight: var(--fw-semibold); color: var(--text);
       padding-right: var(--sp-2);
       white-space: nowrap;
@@ -321,10 +323,15 @@
       /* 28px is a pointer target. A finger needs about 44, so everything that can
          be tapped grows with the layout — including the tree rows, which are the
          most-tapped control in the app, and the splitter, which was a 14px strip. */
-      #ms-bar { gap: var(--sp-2); padding: var(--sp-2); padding-left: 52px; flex-wrap: wrap; }
-      #ms-bar .ms-path { min-width: 0; flex: 1 1 140px; }
+      #ms-bar { gap: 4px; padding: var(--sp-2); flex-wrap: wrap; }
+      #ms-bar .ms-nav { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; }
+      #ms-bar .ms-brand { padding-right: 0; }
+      #ms-bar .ms-file-actions { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; }
+      #ms-bar .ms-appearance { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+      #ms-bar .ms-path { order: 1; min-width: 0; flex: 1 1 100%; padding: 2px 4px; }
+      #ms-bar .ms-mtime, #ms-bar .ms-sep { display: none; }
       #ms-bar button, #ms-bar a.btn { min-width: 44px; height: 44px; }
-      #ms-searchbar button { width: 42px; height: 42px; }
+      #ms-searchbar button { width: 44px; height: 44px; }
       #ms-searchbar input { padding: 10px 10px; }
       .ms-row { min-height: 44px; }
       /* collapsing with the toggle fully hides the tree so the body goes full-screen */
@@ -343,7 +350,6 @@
   </style>
 </head>
 <body>
-  <a href="/" aria-label="StationDesk home" style="position:fixed;right:12px;bottom:12px;z-index:1000;color:var(--text);background:var(--bg);padding:8px;border-radius:8px">StationDesk</a>
   <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
     <symbol id="i-sidebar" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
       <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2"/><path d="M6.25 2.75v10.5"/>
@@ -394,21 +400,27 @@
   </svg>
 
   <div id="ms-bar">
+    <div class="ms-nav">
     <button id="ms-tree-toggle" aria-label="Toggle sidebar" title="Toggle sidebar" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-sidebar"/></svg></button>
     <button id="ms-refresh" aria-label="Re-read the tree from disk" title="Refresh"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></button>
     <span class="ms-sep" aria-hidden="true"></span>
-    <span class="ms-brand">File Viewer</span>
+    <span class="ms-brand"><img class="ms-app-icon" src="/assets/app-icons/fileview.svg" alt="">File Viewer</span>
+    </div>
     <span class="ms-path" id="ms-path" title="Click path to copy" aria-label="Current file path (click to copy)">—</span>
     <span class="ms-mtime" id="ms-mtime" title="Last modified" aria-label="Document last modified"></span>
+    <div class="ms-file-actions">
     <button id="ms-copy" disabled aria-label="Copy file contents to clipboard" title="Copy contents"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button>
     <button id="ms-download" disabled aria-label="Download current file" title="Download"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg></button>
     <button id="ms-rawtoggle" hidden aria-label="Show the raw text instead" title="Raw text"><svg class="ic" aria-hidden="true"><use id="ms-rawtoggle-ic" href="#i-raw"/></svg></button>
     <button id="ms-edit" disabled aria-label="Edit this file" title="Edit" aria-pressed="false"><svg class="ic" aria-hidden="true"><use id="ms-edit-ic" href="#i-edit"/></svg></button>
     <button id="ms-save" class="labelled" hidden aria-label="Save changes (Ctrl+S)" title="Save (Ctrl+S)"><svg class="ic" aria-hidden="true"><use href="#i-save"/></svg>Save</button>
     <span class="ms-sep" aria-hidden="true"></span>
+    </div>
+    <div class="ms-appearance">
     <button data-theme-btn="system" aria-label="Follow the system theme" title="System" aria-pressed="true"><svg class="ic" aria-hidden="true"><use href="#i-theme-auto"/></svg></button>
     <button data-theme-btn="light"  aria-label="Light theme" title="Light" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-theme-light"/></svg></button>
     <button data-theme-btn="dark"   aria-label="Dark theme"  title="Dark"  aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-theme-dark"/></svg></button>
+    </div>
   </div>
   <main>
     <div id="ms-treepane">
@@ -433,6 +445,6 @@
   <div id="ms-menu" role="menu" hidden></div>
 
   <script src="/fileview/static/app.js" defer></script>
-<script src="/assets/porthole.js" defer></script>
+<script src="/assets/porthole.js" data-secret="0" defer></script>
 </body>
 </html>

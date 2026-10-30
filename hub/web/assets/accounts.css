@@ -1,0 +1,113 @@
+/* Agent accounts: rows, inline logout confirmation and the login sheet.
+   Shared by the hub settings sheet, /accounts/ and the Porthole panel. */
+.acc-list { list-style: none; margin: 0; padding: 0; }
+.acc-row { display: flex; align-items: center; gap: var(--stationdesk-sp-3);
+           min-height: 58px; padding: 10px 0; }
+.acc-row + .acc-row { border-top: 1px solid var(--stationdesk-hairline); }
+.acc-tile { flex: none; width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center;
+            background: var(--stationdesk-surface-2); font-size: 13px; font-weight: var(--stationdesk-fw-bold);
+            letter-spacing: -.02em; }
+.acc-txt { flex: 1; min-width: 0; }
+.acc-name { font-size: var(--stationdesk-fs-sm); font-weight: var(--stationdesk-fw-semibold); }
+.acc-sub { display: flex; align-items: center; gap: 6px; font-size: var(--stationdesk-fs-xs);
+           color: var(--stationdesk-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acc-sub::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%;
+                   background: var(--stationdesk-hairline); }
+.acc-row[data-tone="in"] .acc-sub::before { background: var(--stationdesk-line); }
+.acc-row[data-tone="out"] .acc-sub::before { background: var(--stationdesk-mute); }
+.acc-row[data-tone="alert"] .acc-sub { color: var(--stationdesk-danger); }
+.acc-row[data-tone="alert"] .acc-sub::before { background: var(--stationdesk-danger); }
+.acc-row[data-off] { opacity: .55; }
+.acc-row[data-confirm] .acc-sub::before { display: none; }
+.acc-acts { flex: none; display: flex; gap: 6px; }
+.acc-btn { min-height: 30px; padding: 0 14px; border-radius: var(--stationdesk-r-pill); font: inherit;
+           font-size: var(--stationdesk-fs-xs); font-weight: var(--stationdesk-fw-semibold); cursor: pointer;
+           border: 1px solid var(--stationdesk-hairline); background: transparent; color: var(--stationdesk-ink);
+           transition: background var(--stationdesk-dur-fast), opacity var(--stationdesk-dur-fast); }
+.acc-btn:hover { background: var(--stationdesk-surface-2); }
+.acc-btn:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+.acc-btn:disabled { opacity: .55; cursor: default; }
+.acc-go { border: 0; background: var(--stationdesk-primary); color: var(--stationdesk-on-primary); }
+.acc-go:hover { background: var(--stationdesk-primary); opacity: .9; }
+.acc-danger { border: 0; background: var(--stationdesk-danger); color: #fff; }
+.acc-danger:hover { background: var(--stationdesk-danger); opacity: .9; }
+.acc-ghost { border-color: transparent; color: var(--stationdesk-mute); }
+.acc-msg { margin: var(--stationdesk-sp-2) 0 0; font-size: var(--stationdesk-fs-xs); color: var(--stationdesk-danger); }
+.acc-msg:empty { display: none; }
+
+.acc-veil { position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center;
+            padding: var(--stationdesk-sp-4); background: rgba(0, 0, 0, .45);
+            -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+            animation: acc-fade var(--stationdesk-dur-slow); }
+.acc-sheet { width: min(440px, 100%); max-height: 100%; overflow: auto; color: var(--stationdesk-ink);
+             background: var(--stationdesk-surface-1); border: 1px solid var(--stationdesk-hairline);
+             border-radius: 18px; box-shadow: var(--stationdesk-shadow-hover);
+             animation: acc-rise var(--stationdesk-dur-slow) var(--stationdesk-ease); }
+.acc-head { display: flex; align-items: center; gap: var(--stationdesk-sp-3); padding: 18px 20px 6px; }
+.acc-head .acc-tile { width: 40px; height: 40px; border-radius: 11px; font-size: 15px; }
+.acc-head h2 { flex: 1; margin: 0; font-size: var(--stationdesk-fs-lg); letter-spacing: var(--stationdesk-track); }
+.acc-x { width: 30px; height: 30px; border: 0; border-radius: 50%; cursor: pointer; font-size: 13px;
+         background: var(--stationdesk-surface-2); color: var(--stationdesk-mute); }
+.acc-x:hover { color: var(--stationdesk-ink); }
+.acc-x:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+.acc-body { padding: 4px 20px 20px; }
+.acc-body > p { margin: 0 0 14px; color: var(--stationdesk-body); font-size: var(--stationdesk-fs-sm); }
+/* Numbered steps, each followed by the one thing it asks for. */
+.acc-step { display: flex; align-items: center; gap: 10px; margin: 14px 0 10px;
+            font-size: var(--stationdesk-fs-sm); color: var(--stationdesk-body); }
+.acc-step:first-child { margin-top: 4px; }
+.acc-step b { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+              background: var(--stationdesk-surface-2); color: var(--stationdesk-ink); font-size: 12px; }
+.acc-open { display: flex; align-items: center; justify-content: center; min-height: 40px;
+            font-size: var(--stationdesk-fs-sm); text-decoration: none; }
+.acc-code { display: block; width: 100%; padding: 14px; border: 1px dashed var(--stationdesk-hairline);
+            border-radius: var(--stationdesk-r-md); background: var(--stationdesk-surface-2); cursor: copy;
+            color: var(--stationdesk-ink); font: 600 26px/1.2 var(--stationdesk-font-mono); letter-spacing: .12em;
+            text-align: center; }
+.acc-code:focus-visible { outline: none; box-shadow: var(--stationdesk-focus); }
+.acc-code[data-copied] { border-color: var(--stationdesk-line); }
+.acc-input { display: block; width: 100%; min-height: 40px; padding: 0 12px; box-sizing: border-box;
+             border: 1px solid var(--stationdesk-hairline); border-radius: var(--stationdesk-r-sm);
+             background: var(--stationdesk-canvas); color: var(--stationdesk-ink); font: inherit;
+             font-size: var(--stationdesk-fs-sm); }
+.acc-input:focus { outline: none; border-color: var(--stationdesk-primary); box-shadow: var(--stationdesk-focus); }
+.acc-entry { display: flex; gap: 8px; }
+.acc-entry .acc-input { flex: 1; min-width: 0; }
+.acc-entry .acc-btn { min-height: 40px; padding: 0 18px; font-size: var(--stationdesk-fs-sm); }
+.acc-foot .acc-go { min-height: 36px; padding: 0 18px; }
+.acc-choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.acc-choices .acc-btn { min-height: 36px; padding: 0 16px; }
+.acc-error { margin: 4px 0 0; color: var(--stationdesk-danger); font-size: var(--stationdesk-fs-sm); }
+.acc-foot { display: flex; align-items: center; gap: 10px; margin-top: 14px;
+            font-size: var(--stationdesk-fs-xs); color: var(--stationdesk-mute); }
+.acc-foot span { flex: 1; }
+.acc-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--stationdesk-hairline);
+            border-top-color: var(--stationdesk-accent); animation: acc-turn .9s linear infinite; }
+.acc-done { text-align: center; padding: 22px 0 6px; }
+.acc-ok { width: 56px; height: 56px; margin: 0 auto 12px; border-radius: 50%; display: grid; place-items: center;
+          background: var(--stationdesk-line); color: #fff; animation: acc-rise .35s var(--stationdesk-ease); }
+.acc-ok svg { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-width: 2.6;
+              stroke-linecap: round; stroke-linejoin: round; }
+.acc-done h3 { margin: 0; font-size: var(--stationdesk-fs-lg); }
+.acc-done p { margin: 4px 0 18px; color: var(--stationdesk-mute); font-size: var(--stationdesk-fs-sm); }
+.acc-done .acc-btn { min-height: 40px; padding: 0 28px; font-size: var(--stationdesk-fs-sm); }
+/* Inside the Porthole panel the panel already has a title bar and a frame. */
+/* The panel frame is the Porthole's dark chrome, so the embedded sheet is dark too. */
+.acc-embedded body { background: transparent; }
+.acc-embedded .acc-veil { position: static; padding: 0; background: none; backdrop-filter: none;
+                          -webkit-backdrop-filter: none; animation: none; }
+.acc-embedded .acc-sheet { width: 100%; border: 0; border-radius: 0; box-shadow: none; animation: none;
+                          background: transparent; }
+.acc-embedded .acc-head { display: none; }
+.acc-embedded .acc-body { padding-top: 16px; }
+@keyframes acc-fade { from { opacity: 0; } }
+@keyframes acc-rise { from { opacity: 0; transform: translateY(14px) scale(.98); } }
+@keyframes acc-turn { to { transform: rotate(360deg); } }
+@media (max-width: 560px) {
+  .acc-veil { align-items: flex-end; padding: 0; }
+  .acc-sheet { border-radius: 18px 18px 0 0; padding-bottom: env(safe-area-inset-bottom); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .acc-veil, .acc-sheet, .acc-ok { animation: none; }
+  .acc-spin { animation-duration: 3s; }
+}

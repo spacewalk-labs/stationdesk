@@ -4,6 +4,17 @@
   var source = document.querySelector("body > pre");
   if (!source) return;
 
+  if (!document.querySelector('meta[name="viewport"]')) {
+    var viewport = document.createElement("meta");
+    viewport.name = "viewport"; viewport.content = "width=device-width, initial-scale=1";
+    document.head.appendChild(viewport);
+  }
+  if (!document.querySelector('link[rel~="icon"]')) {
+    var favicon = document.createElement("link");
+    favicon.rel = "icon"; favicon.type = "image/svg+xml"; favicon.href = "/stationdesk-publish-icon.svg";
+    document.head.appendChild(favicon);
+  }
+
   function parseRows(html) {
     return html.split("\n").map(function (line) {
       var holder = document.createElement("div");

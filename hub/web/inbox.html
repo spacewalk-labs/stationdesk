@@ -9,9 +9,11 @@
   <link rel="stylesheet" href="/assets/stationdesk-tokens.css">
   <link rel="stylesheet" href="/assets/devmon-card-ui.css">
   <link rel="stylesheet" href="/assets/devmon-inbox.css">
-  <style>body{margin:0;padding:12px;background:var(--stationdesk-canvas);font:14px var(--stationdesk-font);}.inbox-footer{margin-top:14px;text-align:right}.inbox-footer a{color:var(--stationdesk-primary);font-size:13px;text-decoration:none}</style>
+  <style>body{margin:0;padding:12px;background:var(--stationdesk-canvas);font:14px var(--stationdesk-font);}.inbox-header{display:flex;align-items:center;gap:16px;margin-bottom:20px}.inbox-header[hidden]{display:none}.inbox-header a{display:inline-flex;align-items:center;gap:8px;min-height:44px;color:var(--stationdesk-mute);text-decoration:none}.inbox-header img{width:24px;height:24px}.inbox-header h1{margin:0;font-size:20px;color:var(--stationdesk-ink)}.inbox-footer{margin-top:14px;text-align:right}.inbox-footer a{color:var(--stationdesk-primary);font-size:13px;text-decoration:none}</style>
 </head>
 <body>
+  <header class="inbox-header" id="inbox-header" hidden><a href="/"><img src="/assets/favicon.svg" alt=""><span data-i18n-ko="← 홈">← Home</span></a><h1 data-i18n-ko="수신함">Inbox</h1></header>
+  <script>document.getElementById("inbox-header").hidden = window.self !== window.top;</script>
   <main class="devmon-inbox" id="inbox"></main>
   <footer class="inbox-footer"><a href="/monitor/" target="_blank" rel="noopener noreferrer" data-i18n-ko="Dev Monitor 에서 보기 ↗">Open in Dev Monitor ↗</a></footer>
   <script src="/assets/devmon-card-ui.js"></script>

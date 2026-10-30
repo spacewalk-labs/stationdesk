@@ -9,6 +9,35 @@
     try { return localStorage.getItem("stationdesk-language") === "ko" ? ko : en; }
     catch (_) { return en; }
   }
+  // How an account row reads. The Porthole runs alone on app pages, so this is the one
+  // copy; the hub's account list (accounts.js) reads it from here, including inside the
+  // panel iframe, which is why it is published before the iframe guard below.
+  var ACCOUNT_AGENTS = [["claude", "Claude Code", "C"], ["codex", "Codex", "Cx"], ["opencode", "OpenCode", "O"], ["agy", "agy", "a"]];
+  function accountIdentity(row) {
+    var text = row.id === "claude" ? [row.plan, row.email].filter(Boolean).join(" · ") :
+      row.id === "codex" ? (row.method === "ChatGPT" ? t("ChatGPT account", "ChatGPT 계정") : row.method === "API key" ? t("API key", "API 키") : "") :
+      row.id === "opencode" && row.credentials ? (row.providers && row.providers.length ? row.providers.join(" · ") :
+        t(row.credentials + " API key" + (row.credentials === 1 ? "" : "s"), "API 키 " + row.credentials + "개")) : "";
+    return text || t("Signed in", "로그인됨");
+  }
+  function accountDescribe(row, known) {
+    if (row.status === "logged_in") return { text: accountIdentity(row), tone: "in" };
+    if (row.status === "logged_out" && (known || []).indexOf(row.id) >= 0)
+      return { text: t("Signed out · sign in again", "로그아웃됨 · 다시 로그인해 주세요"), tone: "alert" };
+    if (row.status === "logged_out") return { text: t("Not signed in", "로그인 안 됨"), tone: "out" };
+    if (row.status === "unsupported") return { text: t("Status is shown inside agy", "상태는 agy 안에서 보입니다"), tone: "none" };
+    if (row.status === "not_installed") return { text: t("Not installed", "설치되지 않음"), tone: "none" };
+    return { text: t("Could not check status", "상태를 확인하지 못했습니다"), tone: "none" };
+  }
+  function accountSummary(info) {
+    var known = info.known || [], agents = info.agents || [];
+    var bad = agents.filter(function (r) { return accountDescribe(r, known).tone === "alert"; }).length;
+    var signed = agents.filter(function (r) { return r.status === "logged_in"; }).length;
+    return bad ? { text: t(bad + " need sign-in again", bad + "개 다시 로그인 필요"), alert: true }
+      : { text: t(signed + " signed in", signed + "개 로그인됨"), alert: false };
+  }
+  window.StationDeskAccountText = { agents: ACCOUNT_AGENTS, identity: accountIdentity,
+                                    describe: accountDescribe, summary: accountSummary };
   var ID = "stationdesk-porthole";
   if (window.top !== window.self) return;          // hidden inside iframes/previews
   if (document.getElementById(ID)) return;
@@ -18,6 +47,7 @@
   var wantMenu = true;
   var accountBase = "";
   var secretBase = "";
+  var wantSecret = true;
   function baseUrl(v) { return String(v).replace(/\/+$/, "") + "/"; }
   var wantBadge = true;
   var peekNormalMs = 15000, peekUrgentMs = 90000;
@@ -31,6 +61,7 @@
       if (self.dataset.menu === "1") wantMenu = true;
       if (self.dataset.accountPanel) accountBase = baseUrl(self.dataset.accountPanel);
       if (self.dataset.secretPanel) secretBase = baseUrl(self.dataset.secretPanel);
+      if (self.dataset.secret === "0") wantSecret = false;
       if (self.dataset.badge === "0") wantBadge = false;
       peekNormalMs = stationdeskPeekDuration(self.dataset.peekNormalMs, 15000);
       peekUrgentMs = stationdeskPeekDuration(self.dataset.peekUrgentMs, 90000, 90000);
@@ -39,7 +70,7 @@
   var useMenu = wantMenu;
   var HUB = baseUrl(self && self.dataset.hubUrl || location.origin);
   accountBase = accountBase || HUB + "accounts/";
-  secretBase = secretBase || HUB + "devterm/?secret=1";
+  secretBase = wantSecret ? secretBase || HUB + "devterm/?secret=1" : "";
   var UNREAD_URL = "/monitor/api/owner/messages/preview";
   var ALERT_URL = wantBadge ? "/accounts/status.json" : "";
   var POLL_MS = 30000;
@@ -156,7 +187,9 @@
       var cs = window.getComputedStyle(probe);
       safeArea.top = parseFloat(cs.paddingTop) || 0;
       safeArea.right = parseFloat(cs.paddingRight) || 0;
-      safeArea.bottom = parseFloat(cs.paddingBottom) || 0;
+      safeArea.bottom = (parseFloat(cs.paddingBottom) || 0) +
+        Math.max(0, parseFloat(window.getComputedStyle(document.documentElement)
+          .getPropertyValue("--stationdesk-porthole-bottom")) || 0);
       safeArea.left = parseFloat(cs.paddingLeft) || 0;
     } catch (e) {
       safeArea = { top: 0, right: 0, bottom: 0, left: 0 };
@@ -188,7 +221,7 @@
       S.left = "calc(env(safe-area-inset-left, 0px) + 14px)";
       S.right = "auto";
     }
-    S.bottom = "calc(env(safe-area-inset-bottom, 0px) + 20px)";
+    S.bottom = (safeArea.bottom + 20) + "px";
     S.top = "auto";
   }
   readSafeArea();
@@ -342,7 +375,18 @@
     if (progress && progress.animate) progress.animate([{ transform: "scaleX(1)" }, { transform: "scaleX(0)" }],
       { duration: duration, fill: "forwards" });
   }
-  window.addEventListener("resize", function () { readSafeArea(); positionPeek(); });
+  function refreshPlacement() {
+    readSafeArea();
+    if (mode === "floating") {
+      if (placed) {
+        var r = btn.getBoundingClientRect();
+        applyXY(r.left, r.top);
+      } else anchorFloatDefault();
+    }
+    positionPeek();
+  }
+  window.addEventListener("resize", refreshPlacement);
+  window.addEventListener("stationdesk:layout-changed", refreshPlacement);
   window.addEventListener("scroll", positionPeek, true);
   var RING_BASE = S.boxShadow;
   var alertLevel = "", alertInfo = null, blinkTimer = null, blinkOn = false;
@@ -375,12 +419,13 @@
         var login = document.getElementById("agent-login");
         if (login) login.hidden = a.needs_login !== true;
         paintRing();
+        renderAccounts();
       })
-      .catch(function () { alertInfo = null; alertLevel = ""; paintRing(); });
+      .catch(function () { alertInfo = null; alertLevel = ""; paintRing(); renderAccounts(); });
   }
   var menuEl = null, modalEl = null;
   function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
-  function closeModal() { if (modalEl) { modalEl.remove(); modalEl = null; } }
+  function closeModal() { if (modalEl) { modalEl.remove(); modalEl = null; pollAlert(); } }
   function menuRow(label, sub, onClick) {
     var b = document.createElement("button");
     b.type = "button";
@@ -398,7 +443,7 @@
     b.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onClick(); });
     return b;
   }
-  function openPanel(which, title, base) {
+  function openPanel(which, title, base, width, height) {
     closeMenu();
     closeModal();
     var ov = document.createElement("div");
@@ -406,7 +451,7 @@
       "display:flex;align-items:center;justify-content:center;" + safePad(16);
     var box = document.createElement("div");
     box.style.cssText = "background:#1b1f29;border:1px solid #3a4254;border-radius:12px;" +
-      "box-shadow:0 18px 48px rgba(0,0,0,.5);width:min(420px,100%);height:min(560px,92vh);" +
+      "box-shadow:0 18px 48px rgba(0,0,0,.5);width:min(" + (width || 420) + "px,100%);height:min(" + (height || 560) + "px,92vh);" +
       "box-sizing:border-box;max-height:100%;display:flex;flex-direction:column;overflow:hidden;";
     var head = document.createElement("div");
     head.style.cssText = "flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:10px 12px;" +
@@ -472,26 +517,112 @@
     (document.body || document.documentElement).appendChild(ov);
     modalEl = ov;
   }
+  // Account rows read the status this script already polls for the ring. Every action
+  // opens the hub's account sheet in a panel, so sign-in and sign-out have one implementation.
+  // Colours are the dark StationDesk tokens: this menu runs on pages without them.
+  var accountsEl = null, accountsSum = null;
+  var TONE = { "in": "#30d158", alert: "#ff6961", out: "#B2B6BD", none: "#465366" };
+  function accountRow(a) {
+    var row = (alertInfo.agents || []).filter(function (r) { return r.id === a[0]; })[0] || { id: a[0], status: "unknown" };
+    var d = accountDescribe(row, alertInfo.known);
+    var li = document.createElement("div");
+    li.style.cssText = "display:flex;align-items:center;gap:12px;padding:9px 14px;min-height:54px;box-sizing:border-box;" +
+      (row.status === "not_installed" ? "opacity:.55;" : "");
+    var tile = document.createElement("div");
+    tile.textContent = a[2];
+    tile.style.cssText = "flex:none;width:34px;height:34px;border-radius:9px;background:#303E51;color:#F5F0E8;" +
+      "display:flex;align-items:center;justify-content:center;font:700 13px/1 -apple-system,system-ui,sans-serif;";
+    var txt = document.createElement("div");
+    txt.style.cssText = "flex:1;min-width:0;";
+    var name = document.createElement("div");
+    name.textContent = a[1];
+    name.style.cssText = "color:#F5F0E8;font:600 14px/1.35 -apple-system,system-ui,sans-serif;";
+    var line = document.createElement("div");
+    line.style.cssText = "display:flex;align-items:center;gap:6px;font:12.5px/1.4 -apple-system,system-ui,sans-serif;" +
+      "white-space:nowrap;overflow:hidden;color:" + (d.tone === "alert" ? TONE.alert : "#B2B6BD") + ";";
+    var dot = document.createElement("span");
+    dot.style.cssText = "flex:none;width:7px;height:7px;border-radius:50%;background:" + TONE[d.tone] + ";";
+    var lt = document.createElement("span");
+    lt.textContent = d.text;
+    lt.style.cssText = "overflow:hidden;text-overflow:ellipsis;";
+    line.appendChild(dot); line.appendChild(lt);
+    txt.appendChild(name); txt.appendChild(line);
+    li.appendChild(tile); li.appendChild(txt);
+    // agy cannot report its state, so it offers both.
+    var ops = [];
+    if (row.installed && row.status !== "logged_in") ops.push("login");
+    if (row.status === "logged_in" || row.status === "unsupported") ops.push("logout");
+    ops.forEach(function (op) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = op === "logout" ? t("Log out", "로그아웃") : t("Log in", "로그인");
+      b.style.cssText = "flex:none;min-height:30px;padding:0 14px;border-radius:999px;cursor:pointer;" +
+        "font:600 12.5px -apple-system,system-ui,sans-serif;" +
+        (op === "login" ? "border:0;background:#F5F0E8;color:#1F2937;" : "border:1px solid #465366;background:transparent;color:#F5F0E8;");
+      b.addEventListener("click", function (e) {
+        e.preventDefault(); e.stopPropagation();
+        openPanel("accounts", op === "login" ? t("Sign in to " + a[1], a[1] + " 로그인") : t("Sign out of " + a[1], a[1] + " 로그아웃"),
+          accountBase + "?agent=" + a[0] + "&do=" + op, 480, 440);
+      });
+      li.appendChild(b);
+    });
+    return li;
+  }
+  function renderAccounts() {
+    if (!accountsEl) return;
+    accountsEl.textContent = "";
+    if (!alertInfo || !alertInfo.agents) {
+      // No status to show: the account page is still one click away.
+      accountsSum.textContent = "";
+      accountsEl.appendChild(menuRow(t("Open agent accounts", "에이전트 계정 열기"), "", function () {
+        openPanel("accounts", t("Agent accounts", "에이전트 계정"), accountBase);
+      }));
+      return;
+    }
+    ACCOUNT_AGENTS.forEach(function (a) { accountsEl.appendChild(accountRow(a)); });
+    var sum = accountSummary(alertInfo);
+    accountsSum.textContent = sum.text;
+    accountsSum.style.color = sum.alert ? TONE.alert : "#B2B6BD";
+  }
+  function separator() {
+    var s = document.createElement("div");
+    s.style.cssText = "height:1px;background:#465366;margin:5px 10px;";
+    return s;
+  }
   function openMenu() {
     if (menuEl) { closeMenu(); return; }
     var m = document.createElement("div");
-    m.style.cssText = "position:fixed;z-index:2147483100;min-width:236px;background:#202431;" +
-      "border:1px solid #3a4254;border-radius:10px;box-shadow:0 14px 36px rgba(0,0,0,.45);" +
-      "padding:5px 0;overflow:hidden;";
-    var cap = document.createElement("div");
-    cap.textContent = "Porthole";
-    cap.style.cssText = "padding:8px 14px 6px;color:#8a93a6;font:600 11px/1.2 -apple-system,system-ui,sans-serif;" +
-      "letter-spacing:.06em;text-transform:uppercase;border-bottom:1px solid #2c3240;margin-bottom:4px;";
-    m.appendChild(cap);
+    m.style.cssText = "position:fixed;z-index:2147483100;width:min(360px,calc(100vw - 16px));background:#263244;" +
+      "border:1px solid #465366;border-radius:14px;box-shadow:0 10px 20px -5px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.08);" +
+      "padding:5px 0;overflow:hidden;box-sizing:border-box;";
     m.appendChild(menuRow(t("Go to StationDesk", "StationDesk 홈"), "", function () { closeMenu(); go(); }));
     m.appendChild(menuRow(t("Inbox · " + unreadCount + " unread", "받은 메시지 · 안 읽음 " + unreadCount), "", openInbox));
-    if (accountBase) {
+    accountsEl = null;
+    // Rows fill in when the status poll answers; without polling the panel is the way in.
+    if (accountBase && ALERT_URL) {
+      m.appendChild(separator());
+      var cap = document.createElement("div");
+      cap.style.cssText = "display:flex;justify-content:space-between;padding:8px 14px 2px;" +
+        "font:600 12px/1.2 -apple-system,system-ui,sans-serif;color:#B2B6BD;";
+      var capName = document.createElement("span");
+      capName.textContent = t("Agent accounts", "에이전트 계정");
+      accountsSum = document.createElement("span");
+      cap.appendChild(capName); cap.appendChild(accountsSum);
+      m.appendChild(cap);
+      accountsEl = document.createElement("div");
+      m.appendChild(accountsEl);
+      renderAccounts();
+      pollAlert();
+      m.appendChild(separator());
+    } else if (accountBase) {
       m.appendChild(menuRow(t("Agent accounts", "에이전트 계정"), "", function () {
         openPanel("accounts", t("Agent accounts", "에이전트 계정"), accountBase);
       }));
     }
     if (secretBase) {
-      m.appendChild(menuRow(t("Secret drop", "시크릿 전달"), t("value stays on the box · path only", "값은 박스에 보관 · 경로만 전달"), function () {
+      m.appendChild(menuRow(t("Secret drop", "시크릿 전달"), document.getElementById("secret-open")
+        ? t("value stays on the box · path only", "값은 박스에 보관 · 경로만 전달")
+        : t("Opens Terminal · sends a path to its session", "터미널에서 열기 · 터미널 세션에 경로 전달"), function () {
         var localSecret = document.getElementById("secret-open");
         if (localSecret) { closeMenu(); localSecret.click(); }
         else openPanel("secret", t("Secret drop", "시크릿 전달"), secretBase);
@@ -570,12 +701,6 @@
       window.addEventListener("pointermove", onMove, true);
       window.addEventListener("pointerup", onUp, true);
       window.addEventListener("pointercancel", onUp, true);
-    });
-    window.addEventListener("resize", function () {     // keep it on-screen on rotate/resize
-      readSafeArea();
-      if (!placed) return;
-      var r = btn.getBoundingClientRect();
-      applyXY(r.left, r.top);
     });
   }
 

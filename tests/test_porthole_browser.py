@@ -62,3 +62,39 @@ class PortholeBrowserTests(unittest.TestCase):
                     self.assertEqual([], errors)
                     page.close()
             browser.close()
+
+    def test_bottom_bar_clearance_updates_and_clamps_restored_position(self):
+        source = (Path(__file__).parents[1] / 'hub/web/assets/porthole.js').read_text()
+        document = '''<!doctype html><meta name="viewport" content="width=device-width">
+          <style>:root{--stationdesk-porthole-bottom:52px}</style>
+          <script src="/assets/porthole.js" data-badge="0" data-secret="0"></script>'''
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=['--no-sandbox'])
+            page = browser.new_page(viewport={'width': 390, 'height': 844})
+            def route(request):
+                if request.request.url.endswith('porthole.js'):
+                    request.fulfill(body=source, content_type='application/javascript')
+                else:
+                    request.fulfill(body=document, content_type='text/html')
+            page.route('**/*', route)
+            page.goto('https://station.test/')
+            button = page.locator('#stationdesk-porthole')
+            button.wait_for()
+            box = button.bounding_box()
+            self.assertAlmostEqual(14, box['x'], delta=1)
+            self.assertAlmostEqual(844 - 52 - 20, box['y'] + box['height'], delta=1)
+            page.evaluate("localStorage.setItem('stationdesk:btn-pos-v1', JSON.stringify({x:20,y:790}))")
+            page.reload()
+            button.wait_for()
+            box = button.bounding_box()
+            self.assertLessEqual(box['y'] + box['height'], 844 - 52)
+            page.evaluate("document.documentElement.style.setProperty('--stationdesk-porthole-bottom','120px');window.dispatchEvent(new Event('stationdesk:layout-changed'))")
+            box = button.bounding_box()
+            self.assertLessEqual(box['y'] + box['height'], 844 - 120)
+            page.set_viewport_size({'width':360,'height':740})
+            page.wait_for_function("document.getElementById('stationdesk-porthole').getBoundingClientRect().bottom <= 620")
+            box = button.bounding_box()
+            self.assertLessEqual(box['y'] + box['height'], 740 - 120)
+            button.click()
+            self.assertEqual(0, page.get_by_text('Secret drop', exact=True).count())
+            browser.close()

@@ -6,7 +6,7 @@
 <title>Bench</title>
 <meta name="application-name" content="Bench">
 <meta name="apple-mobile-web-app-title" content="Bench">
-<link rel="icon" type="image/png" href="icon.png">
+<link id="favicon" rel="icon" type="image/png" href="icon.png">
 
 <style>
   :root { color-scheme:dark; --bg:#141719; --side:#1b1f22; --surface:#202528; --line:#30373a; --fg:#eef1ed; --dim:#9ba8aa; --accent:#cedfb0; }
@@ -73,7 +73,21 @@
   ul { padding-left:20px; }
   li + li { margin-top:8px; }
   a { color:var(--accent); text-underline-offset:3px; }
-  @media(max-width:760px) { nav { width:216px; } .brand { padding:20px 12px; gap:8px; } .brand-mark { display:none; } #home { padding:30px 20px; } #home h2 { font-size:32px; } .grid { grid-template-columns:1fr; } }
+  /* Phones: a 44px rail stays in flow; the expanded list overlays the content instead of squeezing it. */
+  @media(max-width:760px) {
+    nav { position:fixed; inset:0 auto 0 0; z-index:5; width:216px; box-shadow:6px 0 24px #0008; }
+    nav.collapsed { width:44px; box-shadow:none; }
+    main { margin-left:44px; }
+    .brand { padding:20px 12px; gap:8px; }
+    .brand-mark { display:none; }
+    nav.collapsed .brand { padding:14px 0 10px; }
+    nav.collapsed .app-list { padding:0 4px 12px; }
+    nav.collapsed .nav-app { padding:6px 0; }
+    nav.collapsed .sep { margin:10px 6px; }
+    #home { padding:30px 20px; }
+    #home h2 { font-size:32px; }
+    .grid { grid-template-columns:1fr; }
+  }
 </style>
 </head>
 <body>
@@ -119,12 +133,17 @@
   try { apps = (await (await fetch("apps.json", { cache: "no-cache" })).json()).apps; }
   catch (e) { cards.textContent = "앱 목록을 읽지 못했습니다: " + e; }
 
-  toggle.onclick = () => {
-    const collapsed = nav.classList.toggle("collapsed");
+  const favicon = document.getElementById("favicon");
+  const phone = matchMedia("(max-width:760px)");
+  function setCollapsed(collapsed) {
+    nav.classList.toggle("collapsed", collapsed);
     toggle.setAttribute("aria-expanded", String(!collapsed));
     toggle.title = collapsed ? "사이드바 펼치기" : "사이드바 접기";
     toggle.setAttribute("aria-label", toggle.title);
-  };
+  }
+  toggle.onclick = () => setCollapsed(!nav.classList.contains("collapsed"));
+  setCollapsed(phone.matches);
+  phone.addEventListener("change", e => setCollapsed(e.matches));
 
   function show(id) {
     for (const b of list.querySelectorAll("button[data-id]")) {
@@ -148,6 +167,8 @@
     }
     history.replaceState(null, "", id ? "#" + id : location.pathname);
     document.title = id ? `${apps.find(a => a.id === id).name} — Bench` : "Bench";
+    favicon.href = id ? `icons/${id}.png` : "icon.png";
+    if (phone.matches) setCollapsed(true);
   }
 
   function element(tag, className, text) {

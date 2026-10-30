@@ -1,11 +1,18 @@
 // Keep the upstream canvas handlers, while allowing the browser's two-finger zoom.
 (function () {
-  if (window.top === window.self && matchMedia('(pointer:coarse)').matches) {
-    const app = location.pathname.split('/').filter(Boolean)[0];
-    if (app) {
-      location.replace('/stationdesk-bench.html?app=' + encodeURIComponent(app));
-      return;
-    }
+  const match = location.pathname.match(/^\/([a-z0-9-]+)\//);
+  const app = match && match[1];
+  if (app && window.top === window.self && matchMedia('(pointer:coarse)').matches) {
+    location.replace('/stationdesk-bench.html?app=' + encodeURIComponent(app));
+    return;
+  }
+  // Editors that declare no icon get their Bench icon; a vendor icon is kept.
+  if (app && !document.querySelector('link[rel~="icon"]')) {
+    const icon = document.createElement('link');
+    icon.rel = 'icon';
+    icon.type = 'image/png';
+    icon.href = '/icons/' + app + '.png';
+    document.head.appendChild(icon);
   }
   const style = document.createElement('style');
   // One finger still belongs to the editor; two fingers can zoom and pan the page.

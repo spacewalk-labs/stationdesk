@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Publish · StationDesk</title>
 <meta name="apple-mobile-web-app-title" content="Publish">
-<link rel="icon" id="site-icon" type="image/svg+xml" href="/hub/icon.svg">
+<link rel="icon" id="site-icon" type="image/svg+xml" href="/assets/app-icons/publish.svg">
 <link rel="apple-touch-icon" href="/publish/apple-touch-icon.png">
 <link rel="stylesheet" href="/assets/stationdesk-tokens.css">
 <style>
@@ -32,7 +32,9 @@
   h1 { font-size: 1.6rem; margin: 0; letter-spacing: -0.02em; }
   .head-row { display: flex; align-items: center; gap: 0.75rem; }
   .head-row .grow { flex: 1; min-width: 0; }
-  .site-icon { width: 36px; height: 36px; border-radius: 9px; object-fit: contain; flex: none; }
+  #root-note { overflow-wrap: anywhere; word-break: normal; }
+  #site-name { overflow-wrap: anywhere; }
+  .site-icon { align-self: flex-start; margin-top: 3px; width: 36px; height: 36px; border-radius: 9px; object-fit: contain; flex: none; }
   .site-icon[hidden] { display: none; }
   .kvrow { display: grid; grid-template-columns: 8rem 1fr; gap: 0.5rem 0.75rem; font-size: 0.9rem; align-items: center; margin: 0.5rem 0 1rem; }
   .kvrow .k { color: var(--muted); }
@@ -267,7 +269,7 @@
   }
   body { padding: max(env(safe-area-inset-top), 3rem) 1.25rem 5rem; letter-spacing: -.012em; }
   .wrap { max-width: 1040px; }
-  header { margin-bottom: 2rem; padding-left: 48px; }
+  header { margin-bottom: 2rem; }
   h1 { font-size: 2.15rem; line-height: 1.2; letter-spacing: -.055em; }
   .sub { margin-top: .35rem; }
   .notice { border: 0; border-radius: 14px; padding: .9rem 1rem; margin-bottom: 1rem; }
@@ -358,7 +360,7 @@
 <body>
 <div class="wrap">
   <header class="head-row">
-    <img class="site-icon" id="site-logo" alt="" hidden>
+    <img class="site-icon" id="site-logo" src="/assets/app-icons/publish.svg" alt="">
     <div class="grow">
       <h1 id="site-name">Publish</h1>
       <div class="sub" id="root-note">Static share manager</div>
@@ -680,9 +682,10 @@ function applySite() {
   var site = state.site;
   if (!site) return;
   $("#site-name").textContent = site.name;
-  $("#site-logo").src = site.favicon;
+  var appIcon = site.favicon_source ? site.favicon : "/assets/app-icons/publish.svg";
+  $("#site-logo").src = appIcon;
   $("#site-logo").hidden = false;
-  $("#site-icon").href = site.favicon;
+  $("#site-icon").href = appIcon;
   $("#site-icon").removeAttribute("type");
   if (site.custom_name) document.title = site.name;
 }
@@ -1733,6 +1736,6 @@ $$(".modal-bg").forEach(function (m) {
 // ---- init ----
 load();
 </script>
-<script src="/assets/porthole.js" defer></script>
+<script src="/assets/porthole.js" data-secret="0" defer></script>
 </body>
 </html>

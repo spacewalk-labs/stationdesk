@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CAD</title>
-<link rel="icon" type="image/svg+xml" href="/cad/cad.svg">
+<link rel="icon" type="image/svg+xml" href="/assets/app-icons/cad.svg">
 <link rel="stylesheet" href="/assets/stationdesk-tokens.css">
 <style>
 *{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden}body{display:flex;background:var(--stationdesk-canvas);color:var(--stationdesk-body);font:13px/1.5 var(--stationdesk-font)}button,a,input{font:inherit}button{cursor:pointer;color:inherit;background:none;border:0}button:hover,a:hover{background:var(--stationdesk-surface-2)}button:focus-visible,a:focus-visible,input:focus-visible{outline:0;box-shadow:var(--stationdesk-focus)}button:disabled{cursor:default;color:var(--stationdesk-mute)}
@@ -18,7 +18,7 @@ dialog{width:min(360px,90vw);padding:20px;background:var(--stationdesk-surface-1
 </head>
 <body>
 <aside id="drawer" aria-label="Drawings">
-<header><img src="/cad/cad.svg" alt="" title="Saved on this box only"><strong>Drawings</strong><button id="toggle" aria-label="Collapse drawings" aria-expanded="true">‹</button></header>
+<header><img src="/assets/app-icons/cad.svg" alt="" title="Saved on this box only"><strong>Drawings</strong><button id="toggle" aria-label="Collapse drawings" aria-expanded="true">‹</button></header>
 <div class="contents">
 <section id="drawings-panel" aria-label="Drawing library">
 <div class="toolbar"><button id="upload">Upload</button><button id="new-folder">New folder</button><button id="save-as" disabled>Save as…</button><input id="files" type="file" accept=".dxf,.dwg" multiple hidden></div>
@@ -317,12 +317,16 @@ window.addEventListener('message', async event => {
 window.addEventListener('beforeunload', event => {
   if (engineDirty || pendingSaves || failedSaves.size) { event.preventDefault(); event.returnValue = ''; }
 });
-$('toggle').onclick = () => {
-  const collapsed = $('drawer').classList.toggle('collapsed');
+const mobileDrawer = window.matchMedia('(max-width: 640px)');
+function setDrawerCollapsed(collapsed) {
+  $('drawer').classList.toggle('collapsed', collapsed);
   $('toggle').textContent = collapsed ? '›' : '‹';
   $('toggle').setAttribute('aria-expanded', String(!collapsed));
   $('toggle').setAttribute('aria-label', collapsed ? "Expand drawings" : "Collapse drawings");
-};
+}
+$('toggle').onclick = () => setDrawerCollapsed(!$('drawer').classList.contains('collapsed'));
+setDrawerCollapsed(mobileDrawer.matches);
+mobileDrawer.addEventListener('change', event => setDrawerCollapsed(event.matches));
 $('save-as').onclick = async () => {
   try {
     if (!await ensureFolder()) return;
@@ -391,6 +395,6 @@ refresh().catch(error => toast("Couldn't load drawings · " + error.message, tru
 // Install the message listener before the embedded application can announce ready.
 editor.src = '/cad/app/index.html?host=parent';
 </script>
-<script defer src="/assets/porthole.js"></script>
+<script defer src="/assets/porthole.js" data-secret="0"></script>
 </body>
 </html>

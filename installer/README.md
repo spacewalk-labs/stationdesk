@@ -49,10 +49,8 @@ Both packages contain a history-free Git seed of the public source as the setup
 entry point. Installation clones the public StationDesk repository into
 `/opt/stationdesk`; `stationdesk update` follows its main branch with fast-forward
 updates. Internet access is required for that checkout and vendor downloads.
-Setup also installs Claude Code, Codex, OpenCode, and Antigravity when missing.
-Their accounts and subscriptions are separate from StationDesk.
 
-Build outputs must be outside `product/`:
+Keep build outputs outside the source checkout:
 
 ```sh
 bash installer/linux/build-deb.sh /absolute/output/stationdesk-installer_0.1.3_all.deb

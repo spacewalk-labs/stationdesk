@@ -4,8 +4,9 @@ StationDesk is intended for one owner on a private network.
 The one exception is the Publish app: with no external target configured it publishes snapshots you choose
 through Tailscale Funnel (`https://<machine>.<tailnet>.ts.net:10000/<slug>/`, or `:8443` when 10000 is taken),
 reachable by anyone with the link. Funnel exposes only the dedicated snapshot directories, never the private share,
-tells search engines not to index, and is retired when the app is removed. Configuring your own target in
-`state/publish.env` opens no Funnel.
+defaults to a noindex response header unless the owner enables indexing for a snapshot,
+and is retired when the app is removed. Search-engine directives do not restrict access.
+Configuring your own target in `state/publish.env` opens no Funnel.
 Please report vulnerabilities privately to the repository maintainers using GitHub security advisories.
 
 The installer sets its sudo-capable owner as Tailscale operator so later Serve updates need no sudo. Undo with `sudo tailscale set --operator=`.

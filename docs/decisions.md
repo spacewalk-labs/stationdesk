@@ -3,7 +3,7 @@
 - Name: StationDesk; a personal desk of apps, with Bench as the optional workbench.
 - License: AGPL-3.0 with commercial licensing available from Spacewalk.
 - Free core: one owner; collaborator features are outside the core.
-- Public boundary: only this product tree is released as a snapshot.
+- Public repository: product source and notices; setup packages are published as release assets.
 - App identity: folder name; hub uses `hub/`, other apps use `apps/<id>/`; bundled examples fall back to `examples/<id>/`.
 - Manifest: required `label`, `icon`, `port`; optional `serve`, `files`.
   Other keys are ignored. Ports are fixed by apps; add rejects collisions with other installed apps before running the installer.
@@ -29,7 +29,8 @@
   Folder apps use a content digest as `commit`; Git apps keep the Git commit.
   Links have `kind = link`, `label`, `url`, `origin = url`, and empty `artifacts`.
   Convention paths are discovered; only nonstandard paths need `files` declarations.
-- Ledger writes use a temporary file and atomic replace. Operators serialize changes; no lock.
+- Ledger writes use a temporary file and atomic replace. Mutating engine commands
+  serialize through `state/engine.lock` using `flock`.
 - Changed add retires old recorded artifacts absent from the new app contract, using G1/G2.
 - Changed web trees replace their recorded directory so deleted pages disappear.
 - Pending nginx deletion remains recorded until projection succeeds, allowing retry after restore.
@@ -53,14 +54,15 @@
   Its config, PID, temporary files and logs are under `state/`; rendered site under `nginx/`.
   No root nginx include reads user-owned files. Existing system nginx is left alone;
   only a newly installed distro nginx is stopped and disabled during bootstrap.
-  This replaces the original system-nginx bootstrap after the explicit S2 owner decision.
+  This replaced the original system-nginx bootstrap.
 - Owner comes from Tailscale Self.UserID → User.LoginName, falling back to `state/box.toml` owner.
   Offline smoke injects this header on loopback; real access goes through Tailscale Serve.
 - `doctor` runs app smoke scripts and owner/other/anonymous gate probes; zero checks fail.
 - `update` fetches the core and each addon clone, merges only fast forward, then refreshes
   every installed app (excluding links), collecting installation failures.
-- The one bootstrap sudo also sets the installing owner as Tailscale operator, by explicit S2 decision.
-  Undo: `sudo tailscale set --operator=`. Live tailnet Serve must be measured in a later rehearsal.
+- Bootstrap also sets the installing owner as Tailscale operator.
+  Undo: `sudo tailscale set --operator=`. `doctor` checks HTTPS through Serve
+  when the machine has a Tailscale hostname.
 
 - Publish keeps its manager at hub `/publish/`, while shared files use the root of HTTPS 8000.
   Its hub tile opens the manager. Unpublish unlinks symlinks only; direct files and copies remain.
@@ -83,7 +85,7 @@
   it does not mark the card read. The first visit establishes a watermark.
   Optional `/accounts/status.json` is `{ "status": "normal" | "warning" | "critical" }`:
   warning animates at six seconds per orbit, critical at two; absent means no ring.
-  Reduced motion disables animation. This is the S6 account-screen contract.
+  Reduced motion disables animation.
 
 ## Port allocation
 

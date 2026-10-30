@@ -1,30 +1,22 @@
-# paseo patches — AGPL-3.0-only (our own choice, on an Apache-2.0 base)
+# Paseo patches
 
-`agent-history-delete-guard.mjs` refuses CLI permanent deletion before connecting
-or cancelling agents; see the [guard implementation](agent-history-delete-guard.mjs).
+StationDesk's Paseo modifications in this directory are **AGPL-3.0-only**.
+The pinned Paseo 0.8.0 base is **Apache-2.0**; upstream portions retain that
+license. The complete texts are [LICENSE](LICENSE) and
+[UPSTREAM-LICENSE](UPSTREAM-LICENSE). See the repository [NOTICE](../../../NOTICE)
+for component licenses.
 
-**License: `AGPL-3.0-only`** — marked separately from the repo's own AGPL-3.0,
-because the basis is different (see below).
-
-Paseo (`@getpaseo/cli`, upstream https://github.com/getpaseo/paseo) is licensed
-**Apache License, Version 2.0** (changed from AGPL-3.0 as of upstream `v0.7`;
-confirmed against the upstream `LICENSE` file at the pinned `v0.8.0` tag). The
-files in this directory modify Paseo's own bundle, so they are **derivative
-works of Paseo**. Apache-2.0 §4 permits a licensee to "provide additional or
-different license terms and conditions for use, reproduction, or distribution
-of Your modifications" — we exercise that permission and license our own
-modifications **AGPL-3.0-only**, independently of the licence the rest of
-StationDesk happens to carry, for the same reason the core itself is AGPL-3.0:
-the copyright holder's own choice, not an inherited requirement from Paseo.
-The portions of each patched file that remain upstream's own unmodified work
-are still covered by upstream's Apache-2.0 grant — its full text is vendored
-at `UPSTREAM-LICENSE` beside this file, per Apache-2.0 §4(a)'s requirement to
-give recipients a copy of the License. Before upstream `v0.7` these files were
-derivatives of an AGPL-3.0 work and had no choice in the matter; the AGPL-3.0
-election here is now made *by us*, and would remain AGPL-3.0-only even if
-upstream changed licence again.
+The guarded archives and their editable TypeScript source, downstream
+JavaScript delta and build instructions are documented in
+[the bundle README](../vendor/guarded-0.8.0/README.md) and
+[the source README](../vendor/guarded-0.8.0/source/README.md).
+Descriptions below include dated observations from the patches' development;
+they do not report a new test run on the reader's installation.
 
 ## What is here
+
+- **`agent-history-delete-guard.mjs`** — refuses CLI permanent deletion before
+  connecting or cancelling agents.
 
 - **`workspace-git-identity.mjs`** (+ `.test.mjs`) — `getCheckout` reads fresh
   checkout identity with the existing checkout inspector and common-dir resolver,
@@ -66,8 +58,8 @@ upstream changed licence again.
   and a plain close keeps the timeline (only archive drops it). On a box creating ~275 seats a day
   the heap followed the timeline row count to the ~4GB V8 ceiling and the daemon died of "heap out
   of memory" three times in four days (2026-10-16, 10-17, 10-20). The patch unloads a seat idle for
-  `PASEO_IDLE_UNLOAD_MINUTES` (default 30, `0` = off; the unit from `../render.sh` sets 360 since
-  2026-10-21) — session closed, timeline dropped, stored
+  `PASEO_IDLE_UNLOAD_MINUTES` (default 30, `0` = off;
+  `../units/stationdesk-paseo.service` sets 360) — session closed, timeline dropped, stored
   record untouched so it stays `idle`, the same state as a seat nobody touched since a restart —
   and makes closeAgentRuntime drop the timeline too. The next send, fetch or schedule tick resumes
   the seat through `ensureAgentLoaded` and re-reads provider history. The unload runs in Paseo's
@@ -83,8 +75,8 @@ upstream changed licence again.
   Upstream only reloads at daemon start, when every client reconnects and refetches. With
   `idle-agent-unload` clients stay connected through the reload, keep the old epoch, and the app's
   sequencing gate drops every new row whose seq is not 1 (`drop_epoch`): the seat answered, the
-  open chat showed nothing (2026-10-21, "오래된 세션이 말해도 반응이 없다"; every send since #928 was
-  accepted). The patch dispatches `timeline_replacement` — the event rewind already uses — after
+  open chat showed nothing (2026-10-21, "오래된 세션이 말해도 반응이 없다"; the daemon had
+  accepted the sends). The patch dispatches `timeline_replacement` — the event rewind already uses — after
   the first hydration of a load, before the caller's prompt, so viewers refetch the tail and adopt
   the new epoch. Keyed on the first prime rather than the unload id set, so close → reopen is
   covered and the unload sweep cannot race it. It applies alone or on top of `idle-agent-unload`;
@@ -132,20 +124,15 @@ upstream changed licence again.
   agent's model and thinking stay on the session record. Both anchors or none.
 
 - **`provider-subagent-stream-filter.mjs`** (+ reference patch and behavior test)
-  — Paseo 0.2.5 forwards `agent.provider_subagents.update` through connection-wide
-  `Session.emit()`, so every capable browser receives every provider-owned child
-  update regardless of its viewed-agent subscription. The patch routes `upsert`,
-  `timeline`, and `remove` by the existing parent-agent subscription, per WebSocket
-  source. Selective clients receive only a viewed parent; legacy clients retain the
-  old broadcast fallback. This server edit is inseparable from the always-on
-  `--subagent-stream` group in `../browse-host/bin/patch-web-ui.js`: a child-only tab
-  must project its `parentAgentId` into the same subscription set or a server-only
-  filter would freeze that tab. The main installer validates the server candidate,
-  applies and syntax-checks the UI group, then replaces the server file and restarts
-  once. Both correctness halves fail hard on the pinned 0.2.5 layout; the unrelated
-  optional `--browse` group remains warn-only. The behavior test extracts the shipped
-  forwarding method and drives selective A/B sources, a legacy source, an unsupported
-  source, every payload kind, and the no-source fallback.
+  — filters provider-child updates by the viewed parent-agent subscription for
+  each WebSocket source. Legacy clients retain the broadcast fallback. The
+  original patch targeted 0.2.5; the current patch targets 0.8.0's
+  `forwardProviderSubagentUpdate` method. It is paired with the
+  `--subagent-stream` group in `../browse-host/bin/patch-web-ui.js`, which
+  includes a child tab's `parentAgentId` in the subscription set. The installer
+  validates both halves before replacing a server candidate. An installed
+  filter that fails its final behavior check stops installation; other warning
+  and drift paths are described at the end of this document.
 
 - **`orphan-process-guard.mjs`** (+ `orphan-process-guard-{claude,codex}.patch`, the
   reference copies, and `orphan-process-guard.test.mjs`, a behaviour check) — paseo
@@ -242,7 +229,7 @@ upstream changed licence again.
 
 - **`paseo-steer-forward.mjs`** (+ `.test.mjs`) — an automatic message (session-delivery,
   `activeTurnBehavior: "steer"`) to a seat running a tool killed that tool call, and the seat
-  read the result "The user doesn't want to proceed… STOP" as a human refusal (taskboard#616).
+  read the result "The user doesn't want to proceed… STOP" as a human refusal (observed during inter-session delivery).
   `agent/provider-registry.js` `wrapSessionProvider` copied the session methods one by one and left
   out `steerActiveTurn`, so `AgentManager.steerOrReplaceActiveTurn` saw it as missing,
   answered "unavailable" and replaced (interrupted) the running turn. The patch forwards the method;
@@ -302,21 +289,14 @@ upstream changed licence again.
   installer normally sees `ALREADY`. Server file changes, so a newly applied patch needs a daemon restart. Senders opt in by passing `clearPendingPermissions: false`
   to `DaemonClient.sendAgentMessage`; this patch alone changes no sender.
 
-- **`anchor-manifest.json`** — records the pinned Paseo/web-ui version, the pristine
-  web-ui SHA, the **shape table** (every bundle state the fleet is known to carry: the
-  pinned bundle plus a named subset of the web-ui edits), every patcher's representative
-  bundle anchors, and the guard-before-group dependency. The offline drift test compares
-  the shape table against `patch-web-ui.js` as data and checks that the manifest still
-  agrees with the installer and patcher sources; it does not vendor any upstream bundle.
-  `paseo_version` tracks `install.sh`'s pin (checked independently); `web_ui.*` tracks
-  `patch-web-ui.js`'s own `PINNED_SHA`/`PINNED_VERSION`/`KNOWN_BUNDLE_SHAPES` (checked
-  independently too) — the two can legitimately lag each other, as they do right now:
-  `paseo_version` is `0.8.0` but `web_ui.*` still describes the 0.2.5 web-ui bundle,
-  because the web-ui patcher's 10 anchors have not been re-derived yet (tracked
-  follow-up — see `../vendor/guarded-0.8.0/README.md`). Once that lands, `web_ui.*`
-  and `patch-web-ui.js`'s constants move together.
+- **`anchor-manifest.json`** — records Paseo 0.8.0, the pristine web UI hash,
+  known patched bundle shapes, representative patch anchors and the paired
+  server/UI dependency. Its `web_ui` version and hash match
+  `patch-web-ui.js`'s `PINNED_VERSION`, `PINNED_SHA` and
+  `KNOWN_BUNDLE_SHAPES`. The manifest records data used by drift checks; it
+  does not include the upstream browser bundle itself.
 
-The browse-host sidecar carries one more AGPL derivative outside this directory:
+The browser-host web UI patcher lives outside this directory:
 **`../browse-host/bin/patch-web-ui.js`** (`SPDX-License-Identifier:
 AGPL-3.0-only`). Its always-on `--subagent-stream` group fixes the provider-child
 subscription boundary, sets the fresh-install font-size defaults (ui 18 / code 14
@@ -328,44 +308,9 @@ the long-press/drag machinery web never arms), and keeps an archive request wait
 for the daemon's answer instead of timing out at 60 s and putting the archived row
 back; its optional `--browse` group contains
 the three live-panel edits. Both share fail-loud state classification, syntax gating,
-and content-hash cache busting. Everything else under `../browse-host/` is an independent sidecar, AGPL-3.0 like the rest of the repo.
+and content-hash cache busting. The remaining browser-host service runs separately from the compiled Paseo packages.
 
-## Why the rest of StationDesk is not a derivative of Paseo
-
-StationDesk runs Paseo as a **separate process** and communicates with it over
-IPC/WebSocket. The StationDesk core and the `apps/paseo/` installer + `browse-host/`
-sidecar (our own code) do not incorporate Paseo's source, so they are *mere
-aggregation*: Paseo's licence does not reach them. Only the modifications **to
-Paseo itself** (here) are derivatives.
-
-Since 2026-09-08 the core is AGPL-3.0 too, chosen by the copyright holder rather
-than inherited. Keeping the two reasons apart still matters — the core's licence
-was always the holder's to choose; for these files, Apache-2.0 §4 is *why*
-there is a choice to make at all (a pre-`v0.7` AGPL-3.0 upstream would have left
-none).
-
-> This is not legal advice. Confirm against the Apache-2.0 and AGPL-3.0 terms —
-> and consider asking the Paseo maintainers for explicit interop guidance —
-> before publishing.
-
-## AGPL §13 (network use)
-
-Because we license these patches (and the web-ui patcher) AGPL-3.0-only by our
-own choice, AGPL-3.0 §13 attaches to them regardless of Paseo's own upstream
-licence: if you offer a modified Paseo carrying these patches to users over a
-network, AGPL-3.0 requires you to offer them the corresponding source. StationDesk's
-own core is independently AGPL-3.0 too (the copyright holder's own choice), so
-this obligation also holds at the whole-product level. Operators of a StationDesk
-deployment that exposes Paseo are responsible for this.
-
-## TODO before public release
-
-- [x] Vendor the full AGPL-3.0 license text into this directory (`LICENSE`) and
-      the upstream Apache-2.0 text (`UPSTREAM-LICENSE`, required by Apache-2.0
-      §4(a) for the unmodified portions of each patched file).
-- [ ] Audit each patch/anchor to confirm only minimal, interoperability-necessary
-      excerpts of Paseo source are reproduced (prefer install-time anchor derivation
-      over shipping verbatim upstream lines where feasible).
+## Additional server patches
 
 - `workspace-remove-delivery.mjs` fixes deleted workspaces remaining in the sidebar
   after reconnect. A sequenced changes-only bootstrap does not seed unchanged
@@ -396,14 +341,24 @@ deployment that exposes Paseo are responsible for this.
   2026-10-15: 9,098 of 10,119 records); the daemon's own server is now dropped there —
   it is re-injected on every launch and resume — and user MCP servers stay. Baked into
   the bundle (both targets); the patcher re-derives it on a new Paseo build and the
-  test runs against the installed tree in `install/test-paseo-bundle-install.sh`.
+  behavior test is `mcp-auth-off-argv.test.mjs`.
   A daemon restart activates it.
+
+## License review record
+
+The original release checklist recorded an open review of
+patch/anchor excerpts, with a preference for install-time derivation where
+feasible. That review has not been recorded as complete here.
+
+For network deployments, see AGPL section 13 in [LICENSE](LICENSE).
 
 ## When a patch no longer fits
 
-A patcher that cannot find its anchor exits 20. On a bundle install that stops
-the install: port the patch to the new Paseo build, or add one line to
-`skip-approved.txt` (`<patcher name> <who approved it and why>`) in the same PR
-that changes the bundle. Until 2026-10-11 the installer only logged "skipped",
-which is how the 0.8.0 upgrade lost a fix without anyone deciding to drop it.
-The original Airlock registry path (`AIRLOCK_PASEO_VERSION`) only warned; StationDesk installs the pinned guarded bundle.
+Patchers generally use exit 20 for an unrecognized anchor. Where `../install.sh`
+passes that result to `patch_skipped`, installation stops unless
+[`skip-approved.txt`](skip-approved.txt) records the patch name, approver and
+reason. Other missing-target, invalid-candidate or optional-feature paths can
+warn and continue; the installer is the authority for each patch's handling.
+Before 2026-10-11, skipped anchors only produced warnings; that earlier behavior
+allowed a fix to be lost during the 0.8.0 upgrade. Port a drifting patch or record
+an intentional skip alongside the bundle change.

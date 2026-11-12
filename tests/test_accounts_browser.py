@@ -32,9 +32,11 @@ def status(**overrides):
 
 @unittest.skipIf(sync_playwright is None, 'Playwright is not installed')
 class AccountsBrowserTests(unittest.TestCase):
-    def open(self, browser, url, width=1280):
+    def open(self, browser, url, width=1280, account_panel=None, hub_url=None):
         page = browser.new_page(viewport={'width': width, 'height': 860})
         state = dict(status=status(), actions=[], waiting=True)
+        if account_panel:
+            state['status']['account_panel'] = account_panel
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
 
@@ -54,7 +56,8 @@ class AccountsBrowserTests(unittest.TestCase):
             if path == 'accounts/':
                 path = 'accounts.html'
             elif path == 'app/':
-                return request.fulfill(body='<body style="background:#0f141c"><script src="/assets/porthole.js"></script></body>',
+                hub = f' data-hub-url="{hub_url}"' if hub_url else ''
+                return request.fulfill(body=f'<body style="background:#0f141c"><script src="/assets/porthole.js"{hub}></script></body>',
                                        content_type='text/html; charset=utf-8')
             elif path in ('', 'hub/'):
                 path = 'index.html'
@@ -194,6 +197,65 @@ class AccountsBrowserTests(unittest.TestCase):
             self.assertEqual([], errors)
             browser.close()
 
+    def test_installed_subscription_panel_opens_from_each_app_origin(self):
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=['--no-sandbox'])
+            for width in (1280, 390):
+                for origin in ('https://station.test', 'https://station.test:8449'):
+                    with self.subTest(width=width, origin=origin):
+                        panel = '/stationdesk-accounts/panel.html?p=accounts&embed=1'
+                        page, state, errors = self.open(browser, origin + '/app/', width, panel,
+                                                       hub_url='https://station.test')
+                        page.click('#stationdesk-porthole')
+                        button = page.get_by_role('button', name='구독 계정 Codex 로그아웃됨 · 다시 로그인')
+                        button.wait_for()
+                        self.assertEqual(0, page.get_by_role('button', name='로그아웃', exact=True).count())
+                        button.click()
+                        self.assertEqual('https://station.test' + panel, page.locator('iframe').get_attribute('src'))
+                        self.assertEqual([], state['actions'])
+                        self.assertEqual([], errors)
+                        self.shot(page, f'subscriptions-{width}-{origin.rsplit(":", 1)[-1]}')
+                        page.close()
+            browser.close()
+
+    def test_a_lit_ring_names_its_reason_on_the_subscription_row(self):
+        # The row that lit the ring wears the ring's colour and says why; no heading of its own.
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=['--no-sandbox'])
+            page, state, errors = self.open(browser, 'https://station.test/app/', 390, '/p')
+            state['status'] |= dict(status='warning', account_alert=dict(
+                level='warn', reason='usage', use5h=None, use7d=91, reset5h=None,
+                reset7d='2026-11-09T04:59:59Z', thresholds=dict(warn5=78, crit5=88, warn7=88, crit7=93)))
+            state['status']['agents'][1] |= dict(logged_in=True, status='logged_in')
+            page.reload()
+            porthole = page.locator('#stationdesk-porthole')
+            page.wait_for_function("document.getElementById('stationdesk-porthole').title.startsWith('Claude 주간 사용량 91%')")
+            porthole.click()
+            reason = page.get_by_text('Claude 주간 사용량 91% · 11월 9일', exact=False)
+            reason.wait_for()
+            self.assertEqual('rgb(230, 179, 77)', reason.evaluate('e => getComputedStyle(e).color'))
+            hint = page.get_by_text('경로만 복사', exact=False)
+            self.assertEqual('rgb(178, 182, 189)', hint.evaluate('e => getComputedStyle(e).color'))
+            self.assertEqual(0, page.get_by_text('에이전트 계정', exact=True).count())
+            self.shot(page, 'porthole-lit-reason')
+            self.assertEqual([], errors)
+            browser.close()
+
+    def test_a_red_ring_names_the_sign_out_not_a_busy_account(self):
+        # Codex signed out (critical) while Claude is merely busy (warn): red names the sign-out.
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=['--no-sandbox'])
+            page, state, errors = self.open(browser, 'https://station.test/app/', 390, '/p')
+            state['status']['account_alert'] = dict(level='warn', reason='usage', use7d=91, use5h=None,
+                                                    reset7d=None, reset5h=None, thresholds=dict(warn7=88, crit7=93))
+            page.reload()
+            page.locator('#stationdesk-porthole').click()
+            reason = page.get_by_text('Codex 로그아웃됨 · 다시 로그인', exact=True)
+            reason.wait_for()
+            self.assertEqual('rgb(224, 90, 90)', reason.evaluate('e => getComputedStyle(e).color'))
+            self.assertEqual([], errors)
+            browser.close()
+
     def test_porthole_menu_lists_accounts_and_logout_needs_a_click_in_the_panel(self):
         with sync_playwright() as p:
             browser = p.chromium.launch(args=['--no-sandbox'])
@@ -248,7 +310,7 @@ class AccountsBrowserTests(unittest.TestCase):
             page.goto('https://station.test/')
             page.click('#stationdesk-porthole')
             secret = page.get_by_text('Secret drop', exact=True)
-            menu = secret.locator('../..')
+            menu = secret.locator('../../..')
             before = menu.bounding_box()['height']
             for request in pending:
                 request.fulfill(json=status())
@@ -267,7 +329,7 @@ class AccountsBrowserTests(unittest.TestCase):
             }""")
             self.assertGreater(menu.evaluate('e => e.scrollHeight'), menu.evaluate('e => e.clientHeight'))
             secret.click()
-            self.assertEqual(1, page.locator('iframe[src*="devterm/?secret=1"]').count())
+            self.assertEqual(1, page.locator('iframe[src$="devterm/secret.html"]').count())
             browser.close()
 
 

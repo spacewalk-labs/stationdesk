@@ -16,8 +16,13 @@ intervening writes and recovery at all four durable write boundaries.
 The later StationDesk overlays were authored against the built JavaScript.
 Their editable patchers and tests are in `../../../patches/`. `distribution.patch`
 is the exact combined JavaScript/declaration delta after the guard build,
-including the current overlays and modification notices. It preserves the
+including the previous overlays and modification notices.
+The subsequent crash-recovery overlay remains editable as `../../../patches/crash-recovery.mjs`
+and `crash-recovery.js`; the archive assembler applies it after this distribution delta. It preserves the
 shipped runtime code rather than replacing it with newly formatted output.
+The Codex child-activity overlay is editable as `../../../patches/codex-subagent-activity.mjs`
+and is applied by the archive assembler after crash recovery. Its synthetic
+behavior/memory regression is `../../../patches/codex-subagent-activity.test.mjs`.
 The unused `schedule/service.js.candidate.mjs` build scratch file is omitted;
 no shipped module refers to it.
 
@@ -51,8 +56,9 @@ bash apps/paseo/vendor/guarded-0.8.0/source/build.sh /tmp/paseo-source /tmp/pase
 with `npm ci --ignore-scripts` using the upstream lockfile, runs the upstream
 protocol generator and TypeScript build commands, checks guard behavior, and
 runs the small archive assembler. The assembler verifies registry input hashes,
-overlays the compiled files, applies `distribution.patch`, and makes deterministic
-archives (fixed tar owner, timestamp, ordering and gzip timestamp). The final
+overlays the compiled files, applies `distribution.patch` and the crash-recovery overlay, and makes deterministic
+archives (fixed creation umask matching the published overlays, tar owner, timestamp,
+ordering and gzip timestamp). The final
 hash check compares every archive with the shipped `../SHA256SUMS`.
 
 The output also contains `INSTALLED_SHA256SUMS`. The installer uses the two
@@ -60,3 +66,7 @@ manifests from the parent directory. The seven archive hashes pin these inputs;
 transitive npm dependencies installed later by StationDesk can still contain
 version ranges, so this is not a claim that the full installed dependency tree
 is frozen.
+
+The Claude streaming string-retention overlay is editable as
+`../../../patches/claude-stream-retention.mjs` and applied by the rebuilder.
+Its real parser/coalescer/store regression is `../../../patches/claude-stream-retention.test.mjs`.

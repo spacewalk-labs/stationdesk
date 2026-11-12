@@ -735,6 +735,148 @@ async def _serve_resolve(head, cw):
 _LAYOUTS = {"even-horizontal", "even-vertical", "tiled", "main-vertical", "main-horizontal"}
 
 
+ORCA_CLI = os.path.expanduser(os.environ.get("STATIONDESK_DEVTERM_ORCA_CLI") or os.path.join(
+    os.environ.get("STATIONDESK_ROOT", "/opt/stationdesk"), "runtime/orca/squashfs-root/resources/bin/orca-ide"))
+
+
+def orca_installed():
+    return os.path.isfile(ORCA_CLI)
+
+
+# ---- Orca ADE integration (worktree source of truth) — optional; enabled only when
+# the Orca app's CLI is present. devterm does not manage its own worktrees; it shares
+# Orca's real worktrees and launches agents (tmux) in the worktree cwd. When the CLI is
+# absent or the runtime is down, _orca returns None and the front-end falls back to the
+# top-tabs layout.
+
+
+async def _orca(*args, timeout=45):
+    """Run the Orca CLI '<args> --json' -> parsed dict. Not-installed / timeout /
+    non-JSON -> None. exec args (not a shell) so no injection."""
+    if not ORCA_CLI or not os.path.isfile(ORCA_CLI):
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ORCA_CLI, *args, "--json",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except (OSError, asyncio.TimeoutError):
+        try:
+            proc.kill()
+        except (OSError, UnboundLocalError, NameError):
+            pass
+        return None
+    try:
+        return json.loads(out.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+
+
+def _short_branch(ref):
+    return ref[len("refs/heads/"):] if isinstance(ref, str) and ref.startswith("refs/heads/") else (ref or "")
+
+
+def _orca_err(d, default):
+    e = (d or {}).get("error")
+    return (e.get("message") if isinstance(e, dict) else None) or default
+
+
+async def _serve_orca_status(cw):
+    if not ORCA_CLI:
+        await _send_json(cw, b"200 OK", {"ok": False, "ready": False, "installed": False})
+        return
+    d = await _orca("status", timeout=20)
+    ready = bool(d and d.get("ok") and d.get("result", {}).get("runtime", {}).get("reachable"))
+    await _send_json(cw, b"200 OK", {"ok": bool(d and d.get("ok")), "ready": ready,
+                                     "installed": os.path.isfile(ORCA_CLI)})
+
+
+async def _serve_orca_tree(cw):
+    """Project (repo) -> worktree tree (Orca's real worktrees = same source as the Orca app)."""
+    repos_d = await _orca("repo", "list")
+    wts_d = await _orca("worktree", "list")
+    if not (repos_d and repos_d.get("ok") and wts_d and wts_d.get("ok")):
+        await _send_json(cw, b"200 OK", {"ok": False, "repos": []})
+        return
+    by_repo = {}
+    for w in wts_d["result"].get("worktrees", []):
+        by_repo.setdefault(w.get("repoId"), []).append({
+            "id": w.get("id"), "path": w.get("path"),
+            "branch": _short_branch(w.get("branch")),
+            "displayName": w.get("displayName") or os.path.basename(w.get("path", "")),
+            "isMain": bool(w.get("isMainWorktree")),
+            "status": w.get("workspaceStatus") or "",
+        })
+    out = []
+    for r in repos_d["result"].get("repos", []):
+        wl = by_repo.pop(r.get("id"), [])
+        wl.sort(key=lambda x: (not x["isMain"], x["displayName"].lower()))
+        out.append({"id": r.get("id"), "name": r.get("displayName") or os.path.basename(r.get("path", "")),
+                    "path": r.get("path"), "worktrees": wl})
+    await _send_json(cw, b"200 OK", {"ok": True, "repos": out})
+
+
+async def _serve_orca_worktree_create(cr, headers, leftover, cw):
+    body = await _read_json_body(cr, headers, leftover, limit=PREFS_MAX) or {}
+    repo_id = str(body.get("repoId", "")).strip()
+    name = str(body.get("name", "")).strip()
+    base = str(body.get("baseBranch", "")).strip()
+    if not repo_id or not name:
+        await _send_json(cw, b"400 Bad Request", {"ok": False, "error": "repoId and name required"})
+        return
+    args = ["worktree", "create", "--repo", "id:" + repo_id, "--name", name]
+    if base:
+        args += ["--base-branch", base]
+    d = await _orca(*args, timeout=150)   # checkout can take a while
+    if not (d and d.get("ok")):
+        await _send_json(cw, b"400 Bad Request", {"ok": False, "error": _orca_err(d, "worktree create failed")})
+        return
+    await _send_json(cw, b"200 OK", {"ok": True, "worktree": d.get("result", {})})
+
+
+async def _serve_orca_worktree_rm(cr, headers, leftover, cw):
+    body = await _read_json_body(cr, headers, leftover, limit=PREFS_MAX) or {}
+    path = str(body.get("path", "")).strip()
+    if not path:
+        await _send_json(cw, b"400 Bad Request", {"ok": False, "error": "path required"})
+        return
+    d = await _orca("worktree", "rm", "--worktree", "path:" + path, "--force", timeout=90)
+    if not (d and d.get("ok")):
+        await _send_json(cw, b"400 Bad Request", {"ok": False, "error": _orca_err(d, "worktree remove failed")})
+        return
+    await _send_json(cw, b"200 OK", {"ok": True})
+
+
+async def _serve_orca_worktree_set(cr, headers, leftover, cw):
+    """Change a worktree's Orca metadata — currently only displayName. git path/branch
+    are immutable (keeps session names stable)."""
+    body = await _read_json_body(cr, headers, leftover, limit=PREFS_MAX) or {}
+    path = str(body.get("path", "")).strip()
+    dn = str(body.get("displayName", "")).strip()
+    if not path or not dn:
+        await _send_json(cw, b"400 Bad Request", {"ok": False, "error": "path and displayName required"})
+        return
+    d = await _orca("worktree", "set", "--worktree", "path:" + path, "--display-name", dn, timeout=60)
+    if not (d and d.get("ok")):
+        await _send_json(cw, b"400 Bad Request", {"ok": False, "error": _orca_err(d, "rename failed")})
+        return
+    await _send_json(cw, b"200 OK", {"ok": True})
+
+
+async def _serve_orca_repo_add(cr, headers, leftover, cw):
+    """Add a project (repo) — register a filesystem path with Orca (orca repo add)."""
+    body = await _read_json_body(cr, headers, leftover, limit=PREFS_MAX) or {}
+    path = str(body.get("path", "")).strip()
+    if not path:
+        await _send_json(cw, b"400 Bad Request", {"ok": False, "error": "path required"})
+        return
+    d = await _orca("repo", "add", "--path", path, timeout=60)
+    if not (d and d.get("ok")):
+        await _send_json(cw, b"400 Bad Request", {"ok": False, "error": _orca_err(d, "add project failed (is it a git repo?)")})
+        return
+    await _send_json(cw, b"200 OK", {"ok": True, "repo": d.get("result", {})})
+
+
 async def _serve_layout(cr, headers, leftover, cw):
     """tmux select-layout — arrange the active window's panes. even-horizontal = equal
     widths. Remote (RMT__) sessions supported when host is in REMOTE_HOSTS."""
@@ -1038,6 +1180,7 @@ async def dispatch(path, method, headers, body, reply):
         "/sessions": _serve_sessions,
         "/tab-prefs": _serve_get_prefs,
         "/recent-images": _serve_recent_images,
+        "/orca/status": _serve_orca_status, "/orca/tree": _serve_orca_tree,
     }
     get_query = {"/recent-image": _serve_recent_image, "/resolve": _serve_resolve}
     posts = {
@@ -1045,6 +1188,8 @@ async def dispatch(path, method, headers, body, reply):
         "/kill-session": _serve_kill_session, "/rename-session": _serve_rename_session,
         "/list-dir": _serve_list_dir, "/tab-prefs": _serve_put_prefs,
         "/layout": _serve_layout, "/pane": _serve_pane,
+        "/orca/worktree-create": _serve_orca_worktree_create, "/orca/worktree-rm": _serve_orca_worktree_rm,
+        "/orca/worktree-set": _serve_orca_worktree_set, "/orca/repo-add": _serve_orca_repo_add,
     }
     if method == "GET" and route in gets:
         await gets[route](writer)

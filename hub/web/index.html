@@ -30,6 +30,7 @@
 <link rel="stylesheet" href="/assets/accounts.css">
 <script src="/assets/app-badges.js"></script>
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
 
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -506,6 +507,7 @@
                   font-weight: var(--stationdesk-fw-semibold); cursor: pointer; }
   .store-action-primary { border-color: transparent; background: var(--stationdesk-primary); color: var(--stationdesk-on-primary); }
   .store-action-danger { border-color: var(--stationdesk-danger); color: var(--stationdesk-danger); }
+  .store-company-toolbar { display: flex; justify-content: flex-end; margin-bottom: var(--stationdesk-sp-3); }
   .store-action:disabled { opacity: .45; cursor: default; }
   /* Where a row's origin, digest and path live. Off the row until it is asked
      for — hover on a pointer, a tap on a finger — because the row's own job is
@@ -660,6 +662,16 @@
       </div>
     </section>
     <section class="set-sec">
+      <div class="set-h" data-i18n-ko="이 박스">This box</div>
+      <div class="set-row">
+        <div class="set-txt">
+          <div class="set-name" data-i18n-ko="탭 아이콘 색">Tab icon colour</div>
+          <div class="set-note" id="frame-note" data-i18n-ko="StationDesk 를 여러 대 쓸 때 탭에서 구분합니다. 이 박스의 모든 앱 탭에 적용됩니다.">Tells several StationDesks apart in the tab strip. Applies to every app tab on this box.</div>
+          <div class="set-opts" id="frame-colors" role="radiogroup" aria-label="Tab icon colour" data-i18n-ko-aria-label="탭 아이콘 색"></div>
+        </div>
+      </div>
+    </section>
+    <section class="set-sec">
       <div class="set-h" data-i18n-ko="에이전트">Agents</div>
       <div class="set-row">
         <div class="set-txt">
@@ -680,6 +692,8 @@
       <div class="set-h"><span class="set-acc-title" data-i18n-ko="에이전트 계정">Agent accounts</span><span class="set-acc-sum" id="set-acc-sum"></span></div>
       <div id="set-accounts"></div>
     </section>
+    <!-- Installed apps may add a section here: app.toml `settings_script = "/<app>/settings.js"`. -->
+    <div id="set-ext"></div>
     <p class="set-foot" id="set-foot" data-i18n-ko="자격 증명은 각 에이전트 CLI 만 보관합니다.">Only each agent’s CLI keeps its credentials.</p>
   </div>
 </header>
@@ -708,6 +722,9 @@
         <div id="store-builtin"></div>
       </section>
       <section class="store-pane" id="store-pane-company" role="tabpanel" aria-labelledby="store-tab-company" hidden>
+        <div class="store-company-toolbar">
+          <button type="button" class="store-action" id="store-company-refresh" data-i18n-ko="목록 새로고침">Refresh list</button>
+        </div>
         <div class="store-alert" id="store-company-alert" role="status" hidden></div>
         <div id="store-company"></div>
       </section>
@@ -1763,6 +1780,7 @@ if (("standalone" in navigator) && navigator.standalone) {
   };
   const builtinEl = document.getElementById("store-builtin");
   const companyEl = document.getElementById("store-company");
+  const companyRefresh = document.getElementById("store-company-refresh");
   const addonEl = document.getElementById("store-addon");
   const linkEl = document.getElementById("store-link");
   const addonForm = document.getElementById("store-addon-form");
@@ -1980,6 +1998,7 @@ if (("standalone" in navigator) && navigator.standalone) {
     if (!value || typeof value !== "object" || Array.isArray(value)
         || !Array.isArray(value.rows)) return false;
     render(value);
+    if (window.stationdeskSettingsRows) window.stationdeskSettingsRows(value.rows);
     return true;
   }
 
@@ -2025,6 +2044,29 @@ if (("standalone" in navigator) && navigator.standalone) {
     } catch (error) { notify(error.message, true); }
     finally { addonSubmit.disabled = false; }
   }
+
+  companyRefresh.addEventListener("click", async () => {
+    const context = {origin: "company"};
+    companyRefresh.disabled = true;
+    companyRefresh.setAttribute("aria-busy", "true");
+    companyRefresh.textContent = StationDeskI18n.t("Refreshing…", "새로고침 중…");
+    setAlert(StationDeskI18n.t("Refreshing the company list…", "회사 목록을 새로 받고 있습니다…"), false, context);
+    try {
+      const response = await fetch("/monitor/api/owner/company/refresh", {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
+      });
+      const answer = await response.json();
+      if (!response.ok) throw new Error(answer.error || StationDeskI18n.t("Could not refresh the list.", "목록을 새로 받지 못했습니다."));
+      render(answer);
+      setAlert(StationDeskI18n.t("Company list refreshed.", "회사 목록을 새로 받았습니다."), false, context);
+    } catch (error) {
+      setAlert(StationDeskI18n.t("Could not refresh the list. Try again. ", "목록을 새로 받지 못했습니다. 다시 시도해 주세요. ") + error.message, true, context);
+    } finally {
+      companyRefresh.disabled = false;
+      companyRefresh.removeAttribute("aria-busy");
+      companyRefresh.textContent = StationDeskI18n.t("Refresh list", "목록 새로고침");
+    }
+  });
 
   async function refreshLinkViews() {
     // The launcher draws links from the manifest projection, so a link edit
@@ -2244,6 +2286,59 @@ if (("standalone" in navigator) && navigator.standalone) {
     if (wanted.has(tile.dataset.appName) && !dot) { dot = document.createElement('span'); dot.className='dot'; dot.title=StationDeskI18n.t("Update available", "업데이트 있음"); tile.append(dot); }
     if (!wanted.has(tile.dataset.appName) && dot) dot.remove();
   } }
+  // An installed app can add a settings section: its app.toml `settings_script` (a same-origin .js path
+  // the app serves) is loaded inside a fresh <section>; the script finds it as document.currentScript.parentElement.
+  const extSections = new Map();   // app id -> its section element
+  window.stationdeskSettingsRows = rows => {
+    const host = document.getElementById('set-ext');
+    if (!host) return;
+    const wanted = new Map();
+    for (const row of rows || []) {
+      const url = row && row.settings_script;
+      if (row.kind === 'app' && row.state !== 'install' && typeof url === 'string'
+          && /^\/[A-Za-z0-9_.\/-]+\.js$/.test(url) && !url.includes('//') && !url.includes('..')) wanted.set(row.id, url);
+    }
+    for (const [id, section] of extSections) {   // removed, or its script changed: drop the section
+      if (wanted.get(id) !== section.dataset.settingsScript) { section.remove(); extSections.delete(id); }
+    }
+    for (const [id, url] of wanted) {
+      if (extSections.has(id)) continue;
+      const section = document.createElement('section');
+      section.className = 'set-sec';
+      section.dataset.settingsApp = id;
+      section.dataset.settingsScript = url;
+      const script = document.createElement('script');
+      script.src = url;
+      script.onerror = () => { section.remove(); extSections.delete(id); };   // retried on the next poll
+      section.append(script);
+      host.append(section);
+      extSections.set(id, section);
+    }
+  };
+  // Tab-icon colour: porthole.js owns the colour list and the drawing; this row only stores a name.
+  const frameBox = document.getElementById('frame-colors');
+  async function frameRow() {
+    if (frameBox.childElementCount || !window.StationDeskFrame) return;
+    let current = '';
+    try { const r = await fetch('/stationdesk-frame.json', {cache: 'no-store'}); if (r.ok) current = (await r.json()).color || ''; } catch (_) {}
+    for (const [name, color, en, ko] of [['', '', 'None', '없음'], ...window.StationDeskFrame.colors]) {
+      const label = document.createElement('label');
+      const input = Object.assign(document.createElement('input'), {type: 'radio', name: 'frame-color', value: name, checked: name === current});
+      const chip = document.createElement('span');
+      chip.style.cssText = 'width:14px;height:14px;border-radius:4px;' + (color ? 'background:' + color : 'border:1px dashed var(--stationdesk-mute)');
+      label.append(input, chip, Object.assign(document.createElement('span'), {textContent: StationDeskI18n.t(en, ko)}));
+      frameBox.append(label);
+    }
+  }
+  frameBox.addEventListener('change', async event => {
+    const note = document.getElementById('frame-note');
+    try {
+      const r = await fetch('/monitor/api/owner/frame', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({color: event.target.value})});
+      if (!r.ok) throw new Error(String(r.status));
+      window.StationDeskFrame.reload();
+    } catch (_) { note.textContent = StationDeskI18n.t('Could not save. Try again.', '저장하지 못했습니다. 다시 시도하십시오.'); }
+  });
+  gear.addEventListener('click', frameRow);
   window.stationdeskSetUpdateIds = ids => { wanted = new Set(ids || []); paint(); };
   new MutationObserver(paint).observe(home,{childList:true});
 })();

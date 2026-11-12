@@ -1,4 +1,3 @@
-/* Keep the floating Porthole above the desktop sidebar actions. */
-@media (min-width: 761px) {
-  :root { --stationdesk-porthole-bottom: 48px; }
-}
+/* Lift the bottom-right Porthole above Paseo's "Agent · N" chip (browse-host dock,
+   fixed right:16px bottom:16px), which it would otherwise cover at every width. */
+:root { --stationdesk-porthole-bottom: 48px; }

@@ -400,6 +400,7 @@
     <label class="btn">Upload file<input type="file" id="upload" hidden></label>
     <button class="btn" id="repair">Repair broken links</button>
     <span class="ext-note" id="ext-note" hidden>External publishing not configured</span>
+    <span class="ext-note" id="funnel-switch-note" hidden>The public internet entrance is off: external links will not open. Publishing a page externally turns it on, or <button class="btn sm" id="funnel-on">Turn on</button></span>
     <span class="ext-note" id="funnel-note" hidden>Tailscale Funnel is not enabled for this tailnet, so external links will not open yet. Allow the <code>funnel</code> attribute for this machine in the <a href="https://login.tailscale.com/admin/acls" target="_blank" rel="noopener">Tailscale admin console</a>, then run <code>stationdesk add publish</code> again.</span>
   </div>
 
@@ -514,6 +515,7 @@
       <span class="k">Site name</span><span id="set-name"></span>
       <span class="k">Favicon</span><span class="fav"><img id="set-favicon" alt=""><span class="sub" id="set-favnote"></span></span>
       <span class="k">External links</span><span id="set-dest"></span>
+      <span class="k">Public entrance</span><span><span id="set-funnel"></span> <button class="btn sm" id="set-funnel-toggle" hidden></button></span>
       <span class="k">Share folder</span><span><code id="set-share"></code></span>
     </div>
     <div class="prompt"><span id="set-prompt"></span><button class="btn sm" id="set-copy">Copy prompt</button></div>
@@ -635,7 +637,9 @@ function load() {
     state.gatedReason = d.gated_disabled_reason || "";
     state.root = d.root || "";
     state.docURL = d.doc_url || "";
-    state.funnelOff = !!(d.funnel && !d.funnel.active);
+    state.funnel = d.funnel || null;
+    state.funnelOff = !!(d.funnel && d.funnel.switch && !d.funnel.active);
+    state.funnelSwitchOff = !!(d.funnel && !d.funnel.switch && !d.funnel.active);
     state.site = d.site || null;
     state.indexing = d.indexing || { available: false, reason: "" };
     applySite();
@@ -709,6 +713,13 @@ function openSettings() {
     + (site.favicon_error ? " \u00b7 not used (" + site.favicon_error + ")" : " \u00b7 added to published pages without their own icon");
   $("#set-dest").textContent = where + (site.base_url ? " \u00b7 " + site.base_url : "")
     + (site.destination === "funnel" && state.funnelOff ? " \u00b7 blocked by tailnet policy" : "");
+  // What tailscale reports (active) decides the words; the switch only says what was asked.
+  var f = state.funnel;
+  $("#set-funnel").textContent = !f ? "Not used (own target)"
+    : f.active ? (f.switch ? "On \u00b7 open to the internet" : "Open \u00b7 closing failed, press Turn off again")
+    : f.switch ? "On \u00b7 blocked by tailnet policy" : "Off \u00b7 external links do not open";
+  $("#set-funnel-toggle").hidden = !f;
+  $("#set-funnel-toggle").textContent = state.funnelSwitchOff ? "Turn on" : "Turn off";
   $("#set-share").textContent = site.share_dir;
   $("#set-prompt").textContent = settingsPrompt(site);
   $("#m-settings").classList.add("show");
@@ -718,6 +729,7 @@ function applyPublicUI() {
   $("#tabs").hidden = !state.publicEnabled;
   $("#ext-note").hidden = state.publicEnabled;
   $("#funnel-note").hidden = !(state.publicEnabled && state.funnelOff);
+  $("#funnel-switch-note").hidden = !(state.publicEnabled && state.funnelSwitchOff);
   if (state.root) $("#root-note").textContent = "Managing " + state.root;
 }
 
@@ -1370,6 +1382,7 @@ function setBundleDiagnostics(plan) {
   if (plan.truncated) messages.push("The candidate list was truncated at " + plan.max_docs + " documents.");
   if ((plan.warnings || []).length) messages.push("Warnings: " + plan.warnings.join("\n"));
   if ((plan.unsupported || []).length) messages.push("Unsupported linked documents: " + plan.unsupported.join(", "));
+  if ((plan.attachments || []).length) messages.push("Linked files published with the page: " + plan.attachments.join(", "));
   var diagnostics = $("#pub-bundle-diagnostics");
   diagnostics.textContent = messages.join("\n");
   diagnostics.hidden = !messages.length;
@@ -1524,9 +1537,10 @@ $("#pub-go").addEventListener("click", function () {
     setBundleDiagnostics({
       missing: plan.missing || [], fetch_failed: plan.fetch_failed || [],
       truncated: plan.truncated, max_docs: plan.max_docs, warnings: r.warnings || [],
-      unsupported: plan.unsupported || []
+      unsupported: plan.unsupported || [], attachments: r.attachments || []
     });
-    toast((r.mode === "gated" ? "Gated link published" : "Published externally") + ((r.bundle || []).length ? " with " + r.bundle.length + " documents" : ""));
+    toast((r.mode === "gated" ? "Gated link published" : "Published externally") + ((r.bundle || []).length ? " with " + r.bundle.length + " documents" : "")
+      + ((r.attachments || []).length ? " + " + r.attachments.length + " linked files" : ""));
     load();
   }).catch(function (e) {
     var responseState = bundlePublishResponseState(bundlePlanState, publishRequest, mPub.dataset.name);
@@ -1540,6 +1554,18 @@ $("#pub-copy").addEventListener("click", function () { copyAndToast(mPub.dataset
 // ---- settings ----
 $("#settings").addEventListener("click", openSettings);
 $("#set-copy").addEventListener("click", function () { copyAndToast($("#set-prompt").textContent); });
+function setFunnel(on, button) {
+  button.disabled = true;
+  apiPost("/publish/api/funnel", { on: on }).then(function (d) {
+    if (!d.ok) throw new Error(d.error || "failed");
+    return load();
+  }).then(function () {
+    if ($("#m-settings").classList.contains("show")) openSettings();
+  }).catch(function (e) { toast("Public entrance: " + e.message); })
+    .then(function () { button.disabled = false; });
+}
+$("#funnel-on").addEventListener("click", function () { setFunnel(true, this); });
+$("#set-funnel-toggle").addEventListener("click", function () { setFunnel(state.funnelSwitchOff, this); });
 $("#set-domain-copy").addEventListener("click", function () { copyAndToast($("#set-domain-prompt").textContent); });
 
 // ---- share popover / row menu ----

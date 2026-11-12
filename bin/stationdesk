@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 import sys
 import tarfile
 import tempfile
@@ -18,6 +19,8 @@ from string import Template
 import tomllib
 from urllib.parse import urlsplit
 import urllib.request
+# Debian/Ubuntu path; user PATHs often lack /usr/sbin, so never look it up there.
+NGINX = '/usr/sbin/nginx'
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from stationdesk_company import Catalog
@@ -57,6 +60,39 @@ class Engine:
         if result.returncode:
             raise RuntimeError(diagnostic_tail(f'{" ".join(args)}: {result.stderr or result.stdout}'))
         return result.stdout.strip()
+
+    def tailscale(self, args, **kwargs):
+        """tailscaled checks the whole serve config on every write: while any path handler
+        exists (a served directory or file), only root may write, operator or not.
+        Retry once under sudo, which the installer already requires."""
+        try:
+            return self.command(['tailscale', *args], **kwargs)
+        except RuntimeError as error:
+            if 'must be root, or be an operator' not in str(error):
+                raise
+            try:
+                return self.command(['sudo', '-n', 'tailscale', *args], **kwargs)
+            except RuntimeError as retry:
+                raise RuntimeError(f'tailscale {" ".join(args)} refused: serve path handlers '
+                                   f'({self.path_handlers()}) require root and sudo -n failed: '
+                                   f'{retry}') from None
+
+    def path_handlers(self):
+        try:
+            config = json.loads(run(['tailscale', 'serve', 'status', '--json']).stdout or '{}')
+        except (OSError, ValueError):
+            return 'unknown'
+        found = []
+        def walk(node):  # Web handlers sit at the top, under Foreground sessions and under Services.
+            if isinstance(node, dict):
+                for host, site in node.get('Web', {}).items():
+                    found.extend(f'{host}{path} -> {handler["Path"]}'
+                                 for path, handler in site.get('Handlers', {}).items() if handler.get('Path'))
+                for key in ('Foreground', 'Services'):
+                    for child in node.get(key, {}).values():
+                        walk(child)
+        walk(config)
+        return ', '.join(found) or 'none found'
 
     def load(self):
         if not self.ledger.exists():
@@ -119,19 +155,56 @@ class Engine:
         environment[f'STATIONDESK_PORT_{key}'] = str(manifest['port'])
         return environment
 
-    def company(self, url=None):
+    def set_box(self, key, value):
+        """Set (or, with None, drop) a top-level box.toml key. Other keys and tables stay."""
         box = self.root / 'state/box.toml'
         content = box.read_text() if box.exists() else ''
-        # company is a top-level box setting. Preserve all other keys and tables.
         sections = re.split(r'(?m)^(?=[ \t]*\[)', content, maxsplit=1)
         top, tables = sections[0], sections[1] if len(sections) > 1 else ''
-        top = re.sub(r'^[ \t]*company[ \t]*=.*(?:\n|$)', '', top, flags=re.MULTILINE)
+        top = re.sub(rf'^[ \t]*{key}[ \t]*=.*(?:\n|$)', '', top, flags=re.MULTILINE)
+        if value is not None:
+            top = f'{key} = {json.dumps(value)}\n' + top
+        self.write(box, (top + tables).encode())
+
+    def company(self, url=None):
         if url:
             url = url.rstrip('/') + '/'
             self.company_fetch(url)
-            top = 'company = ' + json.dumps(url) + '\n' + top
-        self.write(box, (top + tables).encode())
+        self.set_box('company', url or None)
         self.project()
+
+    def funnel(self, on):
+        """Public internet entrance (Tailscale Funnel) for apps that declare one, off by default.
+        The result is checked against tailscale: an open or close that failed must not read as done."""
+        self.set_box('funnel', True if on else None)
+        self.project()
+        if not self.on_tailnet():
+            return
+        # The endpoints project() just recorded: no manifest is read again (links, vanished sources).
+        wrong = [e['https_port'] for entry in self.load()['apps'].values() for e in entry.get('endpoints', [])
+                 if e.get('funnel') and self.funnel_live(e['https_port']) is not on]
+        if not wrong:
+            return
+        ports = ', '.join(f':{port}' for port in wrong)
+        if on:
+            self.set_box('funnel', None)  # not open: leave it asked-for-nothing, so the next publish retries
+            raise RuntimeError(f'funnel did not open on {ports}: the tailnet policy must give this machine '
+                               'the funnel attribute (see the messages above)')
+        raise RuntimeError(f'funnel still open or unknown on {ports}; run `sudo tailscale funnel --https=<port> off`')
+
+    @staticmethod
+    def funnel_live(port):
+        """Whether Funnel is on for this port; None when tailscale cannot say."""
+        result = run(['tailscale', 'funnel', 'status', '--json'])
+        try:
+            allowed = json.loads(result.stdout).get('AllowFunnel') or {} if result.returncode == 0 else None
+        except ValueError:
+            allowed = None
+        return None if allowed is None else any(on and host.endswith(f':{port}') for host, on in allowed.items())
+
+    def funnel_on(self):
+        box = self.root / 'state/box.toml'
+        return box.exists() and tomllib.loads(box.read_text()).get('funnel') is True
 
     def company_fetch(self, url=None):
         try:
@@ -463,6 +536,16 @@ class Engine:
         elif path.is_dir():
             shutil.rmtree(path)
 
+    def stop_unit(self, name, enabled):
+        """Stop and disable; a unit systemd never loaded is already in the target state."""
+        for action in ('stop', 'disable') if enabled else ('stop',):
+            try:
+                self.command(['systemctl', '--user', action, name])
+            except RuntimeError:
+                state = run(['systemctl', '--user', 'show', '-p', 'LoadState', '--value', name])
+                if state.stdout.strip() != 'not-found':
+                    raise
+
     def remove_artifacts(self, artifacts):
         paths = [(artifact, self.check_remove(
             self.unit_dir / artifact['name'] if artifact['kind'] == 'unit'
@@ -470,9 +553,7 @@ class Engine:
         # Check all ancestors before stopping a unit or deleting anything.
         for artifact, path in paths:
             if artifact['kind'] == 'unit' and '@.' not in artifact['name']:
-                self.command(['systemctl', '--user', 'stop', artifact['name']])
-                if artifact.get('enabled', True):
-                    self.command(['systemctl', '--user', 'disable', artifact['name']])
+                self.stop_unit(artifact['name'], artifact.get('enabled', True))
             # project owns nginx changes so G2 can restore removed fragments too.
             if path.parent != self.root / 'nginx/apps.d':
                 if 'target' not in artifact or (path.is_symlink()
@@ -499,11 +580,11 @@ class Engine:
         self.save(ledger)
         try:
             self.project(removed)
-            if self.identity()[1]:
+            if self.on_tailnet():
                 for endpoint in entry.get('endpoints', []):
                     self.unexpose(endpoint)
-            if entry.get('serve') and self.identity()[1]:
-                self.command(['tailscale', 'serve', f'--https={entry["serve"]}', 'off'])
+            if entry.get('serve') and self.on_tailnet():
+                self.tailscale(['serve', f'--https={entry["serve"]}', 'off'])
         except (OSError, RuntimeError):
             # Other artifacts are gone; retain only restored nginx ownership for retry.
             remaining = [a for a in entry['artifacts'] if a['kind'] == 'path'
@@ -550,12 +631,33 @@ class Engine:
     def identity(self):
         status = self.tailscale_status()
         own = status.get('Self') or {}
-        owner = ((status.get('User') or {}).get(str(own.get('UserID')), {}).get('LoginName', '')
-                 or own.get('LoginName', ''))
-        if not owner and (self.root / 'state/box.toml').exists():
+        # A tagged node's login names the node, not a person: its owner comes from box.toml.
+        owner = '' if own.get('Tags') else (
+            (status.get('User') or {}).get(str(own.get('UserID')), {}).get('LoginName', '')
+            or own.get('LoginName', ''))
+        fqdn = own.get('DNSName', '').rstrip('.')
+        if not (owner and fqdn) and (self.root / 'state/box.toml').exists():
             with (self.root / 'state/box.toml').open('rb') as stream:
-                owner = tomllib.load(stream).get('owner', '')
-        return owner, own.get('DNSName', '').rstrip('.')
+                box = tomllib.load(stream)
+            owner = owner or box.get('owner', '')
+            fqdn = fqdn or box.get('fqdn', '')
+        return owner, fqdn
+
+    def on_tailnet(self):
+        """Whether tailscale really has this box; identity()'s fqdn may come from box.toml."""
+        return bool((self.tailscale_status().get('Self') or {}).get('DNSName'))
+
+    def read_hook(self):
+        """box.toml [read] domain/apps: let that identity domain GET the apps' serve ports."""
+        path = self.root / 'state/box.toml'
+        if not path.exists():
+            return '', ()
+        with path.open('rb') as stream:
+            read = tomllib.load(stream).get('read') or {}
+        domain = str(read.get('domain', '')).lstrip('@')
+        if domain and not re.fullmatch(r'[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?', domain):
+            raise ValueError(f'malformed state/box.toml [read] domain: {domain}')
+        return domain, tuple(read.get('apps') or ()) if domain else ()
 
     def render_site(self, apps):
         owner, _ = self.identity()
@@ -570,22 +672,37 @@ class Engine:
                              and list((self.app(app_id)[0] / 'nginx').glob('*.conf')))
         site = Template((self.root / 'nginx/site.tmpl').read_text()).substitute(
             OWNER=owner, ROOT=self.root, PORT=hub['port'], INCLUDES=includes)
+        domain, readers = self.read_hook()
+
+        def gate(app_id):
+            owner_only = f'    if ($http_tailscale_user_login != {owner}) {{ return 403; }}\n'
+            if app_id not in readers:
+                return owner_only
+            # Owner, or one identity domain reading (GET/HEAD) through this app's serve port.
+            return (f'    set $stationdesk_denied "";\n'
+                    f'    if ($http_tailscale_user_login != {owner}) {{ set $stationdesk_denied 1; }}\n'
+                    f'    if ($stationdesk_reader = 1) {{ set $stationdesk_denied ""; }}\n'
+                    f'    if ($stationdesk_denied) {{ return 403; }}\n')
+        if readers:
+            site = ('map "$http_tailscale_user_login:$request_method" $stationdesk_reader {\n'
+                    '    default 0;\n'
+                    f'    "~*^[^@]+@{domain.replace(".", chr(92) + ".")}:(GET|HEAD)$" 1;\n}}\n\n') + site
         for app_id in apps:
             if apps[app_id].get('kind') == 'link':
                 continue
             _, manifest = self.app(app_id)
             if manifest.get('serve') and app_id != 'hub':
                 site += (f'\nserver {{\n    listen 127.0.0.1:{manifest["port"] + 1};\n'
-                         f'    if ($http_tailscale_user_login != {owner}) {{ return 403; }}\n'
+                         f'{gate(app_id)}'
                          f'    include "{self.root}/nginx/apps.d/{app_id}-serve.conf";\n}}\n')
         for app_id, entry in apps.items():
             if entry.get('kind') == 'link':
                 continue
             for endpoint in self.endpoints(app_id):
-                # A funnel endpoint is public by design: its fragment decides what it serves.
-                gate = ('' if endpoint.get('funnel') else
-                        f'    if ($http_tailscale_user_login != {owner}) {{ return 403; }}\n')
-                site += (f'\nserver {{\n    listen 127.0.0.1:{endpoint["gate_port"]};\n{gate}'
+                # A funnel endpoint is public by design; an open one is tailnet-only with no owner
+                # check (its caller is another box, not the owner). The fragment decides what it serves.
+                guard = '' if endpoint.get('funnel') or endpoint.get('open') else gate(app_id)
+                site += (f'\nserver {{\n    listen 127.0.0.1:{endpoint["gate_port"]};\n{guard}'
                          f'    include "{self.root}/nginx/apps.d/{app_id}-endpoint-{endpoint["gate_port"]}.conf";\n}}\n')
         return site
 
@@ -613,7 +730,7 @@ class Engine:
     def expose(self, endpoint):
         url = f'http://127.0.0.1:{endpoint["gate_port"]}'
         if not endpoint.get('funnel'):
-            self.command(['tailscale', 'serve', '--bg', f'--https={endpoint["https_port"]}', url])
+            self.tailscale(['serve', '--bg', f'--https={endpoint["https_port"]}', url])
             return
         # Without the funnel and https node attributes `tailscale funnel` prints an approval
         # URL and waits. Ask the node's capabilities first, so a blocked tailnet policy costs
@@ -623,36 +740,42 @@ class Engine:
             print(f'funnel :{endpoint["https_port"]} blocked by tailnet policy; not enabled', file=sys.stderr)
             return
         try:
-            self.command(['tailscale', 'funnel', '--bg', f'--https={endpoint["https_port"]}', url],
+            self.tailscale(['funnel', '--bg', f'--https={endpoint["https_port"]}', url],
                          timeout=20, stdin=subprocess.DEVNULL)
         except (RuntimeError, subprocess.TimeoutExpired) as error:
             print(f'funnel :{endpoint["https_port"]} not enabled: {error}', file=sys.stderr)
 
     def unexpose(self, endpoint):
         if not endpoint.get('funnel'):
-            self.command(['tailscale', 'serve', f'--https={endpoint["https_port"]}', 'off'])
+            self.tailscale(['serve', f'--https={endpoint["https_port"]}', 'off'])
             return
-        # Never enabled (policy) is the same as retired; nothing to undo.
-        result = run(['tailscale', 'funnel', f'--https={endpoint["https_port"]}', 'off'])
-        if result.returncode:
-            print(f'funnel :{endpoint["https_port"]} off: {result.stderr.strip()}', file=sys.stderr)
+        # Never enabled (policy, switch off) is the same as retired; nothing to undo.
+        # `funnel off` on a port that has none is an error, so ask first; unreadable means try.
+        if self.funnel_live(endpoint['https_port']) is False:
+            return
+        try:
+            self.tailscale(['funnel', f'--https={endpoint["https_port"]}', 'off'])
+        except RuntimeError as error:
+            print(f'funnel :{endpoint["https_port"]} off: {error}', file=sys.stderr)
 
     def serve(self, apps=None):
         apps = self.load()['apps'] if apps is None else apps
-        _, fqdn = self.identity()
-        if not fqdn:
+        if not self.on_tailnet():
             return  # Offline smoke uses box.toml and loopback header probes.
         _, hub = self.app('hub')
-        self.command(['tailscale', 'serve', '--bg', '--https=443',
+        self.tailscale(['serve', '--bg', '--https=443',
                       f'http://127.0.0.1:{hub["port"]}'])
         for app_id, entry in apps.items():
             if entry.get('kind') == 'link':
                 continue
             for endpoint in self.endpoints(app_id):
-                self.expose(endpoint)
+                if endpoint.get('funnel') and not self.funnel_on():
+                    self.unexpose(endpoint)  # the switch is off: close one opened earlier
+                else:
+                    self.expose(endpoint)
             if entry.get('serve') and app_id != 'hub':
                 _, manifest = self.app(app_id)
-                self.command(['tailscale', 'serve', '--bg', f'--https={entry["serve"]}',
+                self.tailscale(['serve', '--bg', f'--https={entry["serve"]}',
                               f'http://127.0.0.1:{manifest["port"] + 1}'])
 
     def update(self, app_id=None):
@@ -686,6 +809,19 @@ class Engine:
         apps = self.load()['apps']
         checked, failed = 0, 0
         owner, fqdn = self.identity()
+        fqdn = fqdn if self.on_tailnet() else ""  # HTTPS probes need the real tailnet, not a configured address
+        tagged = bool((self.tailscale_status().get('Self') or {}).get('Tags'))
+        status = ['-w', '%{http_code} %{url_effective}']
+
+        def answered(stdout, expected):
+            """expected is a status code, or None for any response below 400 (curl -f)."""
+            code, _, final = stdout.partition(' ')
+            if code == expected or (expected is None and code.isdigit() and int(code) < 400):
+                return True
+            # A tagged node's own tailnet requests carry the node, not the owner, so the gate
+            # refuses them: a 403 at the tailnet address proves the route reaches the gate.
+            return tagged and code == '403' and bool(fqdn) and final.startswith(f'https://{fqdn}')
+        stranger = 'other@doctor.invalid'  # in no [read] domain, so every gate must refuse it
         for app_id in apps:
             if apps[app_id].get('kind') == 'link':
                 continue
@@ -698,19 +834,19 @@ class Engine:
             url = f'http://127.0.0.1:{hub["port"]}' + ('/' if app_id == 'hub' else f'/{app_id}/')
             for label, headers, expected in (
                     ('owner', ['-H', f'Tailscale-User-Login: {owner}'], '200'),
-                    ('other', ['-H', f'Tailscale-User-Login: other-{owner}'], '403'),
+                    ('other', ['-H', f'Tailscale-User-Login: {stranger}'], '403'),
                     ('anonymous', [], '403')):
                 probes.append((label, ['curl', '-sSL', '--max-time', '10', '-o', '/dev/null',
-                                      '-w', '%{http_code}', *headers, url], expected))
+                                      *status, *headers, url], expected))
             if manifest.get('serve') and app_id != 'hub':
                 gate = f'http://127.0.0.1:{manifest["port"] + 1}/'
                 for label, headers, expected in (
                         ('root-owner', ['-H', f'Tailscale-User-Login: {owner}'], '200'),
-                        ('root-other', ['-H', f'Tailscale-User-Login: other-{owner}'], '403'),
+                        ('root-other', ['-H', f'Tailscale-User-Login: {stranger}'], '403'),
                         ('root-anonymous', [], '403')):
                     # Follow redirects like the hub probe: Orca's root redirects the owner.
                     probes.append((label, ['curl', '-sSL', '--max-time', '10', '-o', '/dev/null',
-                                          '-w', '%{http_code}', *headers, gate], expected))
+                                          *status, *headers, gate], expected))
             for endpoint in self.endpoints(app_id):
                 gate = f'http://127.0.0.1:{endpoint["gate_port"]}/'
                 if endpoint.get('funnel'):
@@ -718,34 +854,95 @@ class Engine:
                     # through is shown by the app, so only the local listener is probed.
                     probes.append((f'endpoint-{endpoint["https_port"]}-public',
                                    ['curl', '-sS', '--max-time', '10', '-o', '/dev/null',
-                                    '-w', '%{http_code}', gate + 'robots.txt'], '200'))
+                                    *status, gate + 'robots.txt'], '200'))
                     continue
+                if endpoint.get('open'):
+                    continue  # no owner gate to probe; the app's smoke checks what its fragment serves
                 for label, headers, expected in (
                         ('owner', ['-H', f'Tailscale-User-Login: {owner}'], '200'),
-                        ('other', ['-H', f'Tailscale-User-Login: other-{owner}'], '403'),
+                        ('other', ['-H', f'Tailscale-User-Login: {stranger}'], '403'),
                         ('anonymous', [], '403')):
                     probes.append((f'endpoint-{endpoint["https_port"]}-{label}',
                                    ['curl', '-sS', '--max-time', '10', '-o', '/dev/null',
-                                    '-w', '%{http_code}', *headers, gate], expected))
+                                    *status, *headers, gate], expected))
                 if fqdn:
                     probes.append((f'endpoint-{endpoint["https_port"]}-serve',
-                                   ['curl', '-fSs', '--max-time', '10', '-o', '/dev/null',
-                                    f'https://{fqdn}:{endpoint["https_port"]}/']))
+                                   ['curl', '-sS', '--max-time', '10', '-o', '/dev/null', *status,
+                                    f'https://{fqdn}:{endpoint["https_port"]}/'], None))
             if fqdn:
                 port = f':{manifest["serve"]}' if manifest.get('serve') else ''
                 path = '/' if app_id == 'hub' or port else f'/{app_id}/'
-                probes.append(('serve', ['curl', '-fSs', '--max-time', '10',
-                                         '-o', '/dev/null', f'https://{fqdn}{port}{path}']))
+                probes.append(('serve', ['curl', '-sS', '--max-time', '10', '-o', '/dev/null',
+                                         *status, f'https://{fqdn}{port}{path}'], None))
             for label, command, *expected in probes:
                 checked += 1
                 result = run(command, cwd=directory, env=environment)
-                ok = result.returncode == 0 and (not expected or result.stdout == expected[0])
+                ok = result.returncode == 0 and (command[0] != 'curl' or answered(result.stdout, *expected))
                 failed += not ok
                 print(f'{app_id} {label}: {"OK" if ok else "FAIL"}')
                 if not ok:
                     print(result.stderr.strip() or result.stdout, file=sys.stderr)
         print(f'확인 {checked} · 실패 {failed}')
         return int(checked == 0 or failed > 0)
+
+    @staticmethod
+    def listen_sockets(pid):
+        """{socket inode: port} of the loopback TCP listeners in pid's network namespace."""
+        sockets = {}
+        for table in ('tcp', 'tcp6'):
+            path = Path(f'/proc/{pid}/net/{table}')
+            for line in (path.read_text().splitlines()[1:] if path.exists() else ()):
+                fields = line.split()
+                if fields[3] == '0A':  # LISTEN
+                    sockets[fields[9]] = int(fields[1].rsplit(':', 1)[1], 16)
+        return sockets
+
+    @staticmethod
+    def socket_inodes(pid):
+        inodes = set()
+        for fd in Path(f'/proc/{pid}/fd').iterdir():
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.startswith('socket:['):
+                inodes.add(target[8:-1])
+        return inodes
+
+    def nginx_ports(self):
+        """Ports the running StationDesk nginx master listens on."""
+        pid = (self.root / 'state/nginx.pid').read_text().strip()
+        sockets = self.listen_sockets(pid)
+        return {sockets[inode] for inode in self.socket_inodes(pid) if inode in sockets}
+
+    def port_holder(self, port):
+        """'<command> pid <pid>' of a same-user process listening on port, or ''."""
+        sockets = self.listen_sockets('self')
+        wanted = {inode for inode, number in sockets.items() if number == port}
+        for proc in Path('/proc').iterdir():
+            if not proc.name.isdigit():
+                continue
+            try:
+                if wanted & self.socket_inodes(proc.name):
+                    return f'{(proc / "comm").read_text().strip()} pid {proc.name}'
+            except OSError:
+                continue  # another user's process, or gone
+        return ''
+
+    def check_listening(self, site):
+        """`nginx -s reload` exits 0 even when the new config cannot bind a port: nginx logs
+        the error and keeps serving the old config. Stop before tailscale serve points the
+        tailnet at a port another program answers (2026-11-05: an old auth-less IDE on 19933)."""
+        wanted = {int(port) for port in re.findall(r'(?m)^\s*listen 127\.0\.0\.1:(\d+);', site)}
+        for _ in range(50):
+            missing = wanted - self.nginx_ports()
+            if not missing:
+                return
+            time.sleep(0.2)
+        holders = [f'{port} ({holder})' if (holder := self.port_holder(port)) else str(port)
+                   for port in sorted(missing)]
+        raise RuntimeError(f'nginx 가 포트 {", ".join(holders)} 를 열지 못해 새 설정을 적용하지 않았습니다 — '
+                           '그 프로그램을 끄거나 옮긴 뒤 stationdesk project')
 
     def project(self, removed=()):
         ledger = self.load()
@@ -762,8 +959,7 @@ class Engine:
                       f'stationdesk remove {app_id} 또는 다시 설치 ({error})', file=sys.stderr)
                 del apps[app_id]
         catalog = Catalog(self.root)
-        for app_id, icon in catalog.link_icons().items():
-            self.write(self.root / 'web/hub/assets/company-links' / (app_id + icon.suffix), icon.read_bytes())
+        catalog.project_icons()
         for app_id, link in catalog.visible_links().items():
             if app_id not in apps:
                 apps[app_id] = dict(kind='link', label=link['name'], url=link['url'], icon=link.get('icon', ''),
@@ -817,15 +1013,8 @@ class Engine:
         config = self.root / 'state/nginx.conf'
         rendered = self.render_site(apps).encode()
         previous_configs = {p: p.read_bytes() if p.exists() else None for p in (site, config)}
-        try:
-            self.write(site, rendered)
-            self.write(config, self.nginx_config().encode())
-            for name, content in fragments.items():
-                self.write(destination / name, content)
-            for name in set(removed) - fragments.keys():
-                (destination / name).unlink(missing_ok=True)
-            self.command(['nginx', '-t', '-c', str(config)])
-        except (OSError, RuntimeError):
+
+        def restore():
             for path, content in previous_configs.items():
                 if content is None:
                     path.unlink(missing_ok=True)
@@ -835,19 +1024,34 @@ class Engine:
                 (destination / name).unlink(missing_ok=True)
             for name, content in previous.items():
                 self.write(destination / name, content)
+        try:
+            self.write(site, rendered)
+            self.write(config, self.nginx_config().encode())
+            for name, content in fragments.items():
+                self.write(destination / name, content)
+            for name in set(removed) - fragments.keys():
+                (destination / name).unlink(missing_ok=True)
+            self.command([NGINX, '-t', '-c', str(config)])
+        except (OSError, RuntimeError):
+            restore()
             raise
         unit = self.unit_dir / 'stationdesk-nginx.service'
         changed = self.write(unit, (
             '[Unit]\nDescription=StationDesk nginx\nStartLimitBurst=5\n'
             '[Service]\nType=forking\nPIDFile=' + str(self.root / 'state/nginx.pid') + '\n'
-            'ExecStart=/usr/sbin/nginx -c ' + str(config) + '\n'
+            'ExecStart=' + NGINX + ' -c ' + str(config) + '\n'
             'Restart=always\nRestartSec=2\n[Install]\nWantedBy=default.target\n').encode())
         if changed:
             self.command(['systemctl', '--user', 'daemon-reload'])
         self.command(['systemctl', '--user', 'enable', '--now', unit.name])
-        self.command(['nginx', '-s', 'reload', '-c', str(config)])
+        self.command([NGINX, '-s', 'reload', '-c', str(config)])
+        try:
+            self.check_listening(rendered.decode())
+        except RuntimeError:
+            restore()  # the running nginx kept the old config; keep the files equal to it
+            raise
         self.serve(apps)
-        if self.identity()[1]:
+        if self.on_tailnet():
             for endpoint in retired_endpoints:
                 self.unexpose(endpoint)
         for app_id, entry in ledger['apps'].items():
@@ -897,6 +1101,7 @@ class Engine:
         lines = ['# StationDesk box',
                  'This is a remote server. Share browser links with the person using this box.',
                  '사람에게 알릴 일: `stationdesk-card --group <id> --title <message>`.',
+                 'urgent(`--level urgent`) 는 실서비스 다운·인프라 파손만 — 결정 요청·멘션·위생·신선도는 normal(--level 생략).',
                  '| App | URL |', '| --- | --- |']
         for tile in tiles:
             if tile.get('kind') == 'link':
@@ -957,7 +1162,14 @@ def mutation_lock(root):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def system_path(path):
+    """Add the sbin directories login PATHs often lack; app installers check for nft, nginx, ldconfig."""
+    parts = [p for p in path.split(':') if p]
+    return ':'.join(parts + [d for d in ('/usr/local/sbin', '/usr/sbin', '/sbin') if d not in parts])
+
+
 def main():
+    os.environ['PATH'] = system_path(os.environ.get('PATH', ''))
     escaped = escape_app_cgroup()
     if escaped is not None:
         return escaped
@@ -968,6 +1180,7 @@ def main():
     commands.add_parser('list').add_argument('--json', action='store_true')
     for action in ('project', 'doctor'):
         commands.add_parser(action)
+    commands.add_parser('funnel').add_argument('state', choices=('on', 'off'))
     company = commands.add_parser('company').add_mutually_exclusive_group(required=True)
     company.add_argument('url', nargs='?')
     company.add_argument('--off', action='store_true')
@@ -984,7 +1197,7 @@ def main():
     links.add_parser('remove').add_argument('label')
     args = parser.parse_args()
     engine = Engine(Path(__file__).resolve().parent.parent)
-    lock = mutation_lock(engine.root) if args.command in ('add', 'remove', 'update', 'project', 'link', 'company', 'company-link') else nullcontext()
+    lock = mutation_lock(engine.root) if args.command in ('add', 'remove', 'update', 'project', 'link', 'company', 'company-link', 'funnel') else nullcontext()
     with lock:
         return execute(args, engine)
 
@@ -995,6 +1208,9 @@ def execute(args, engine):
     try:
         if args.command == 'company':
             engine.company(None if args.off else args.url)
+            return 0
+        if args.command == 'funnel':
+            engine.funnel(args.state == 'on')
             return 0
         if args.command == 'company-link':
             engine.company_link(args.id, args.show)

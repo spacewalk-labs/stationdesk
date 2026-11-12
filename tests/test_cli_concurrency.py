@@ -22,6 +22,7 @@ def fixture_init(self, directory):
     original_init(self, directory)
     self.unit_dir = root / 'fixture-units'
 module.Engine.__init__ = fixture_init
+module.escape_app_cgroup = lambda: None  # a runner inside a stationdesk-*.service would re-exec through systemd-run
 
 def external(args, **kwargs):
     with (root / 'events').open('a') as stream:
@@ -33,6 +34,7 @@ def external(args, **kwargs):
     output = 'a' * 40 if args[:2] == ['git', 'rev-parse'] else '{}'
     return subprocess.CompletedProcess(args, 0, output, '')
 module.run = external
+module.Engine.nginx_ports = lambda self: {19920}  # the fixture nginx holds the hub port
 (root / (role + '.started')).touch()
 sys.argv = ['stationdesk', *sys.argv[3:]]
 sys.exit(module.main())

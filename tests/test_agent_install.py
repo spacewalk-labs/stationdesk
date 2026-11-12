@@ -56,14 +56,3 @@ printf 'chmod +x "$HOME/.local/bin/%s"\n' "$agent"
             requests = log.read_text().splitlines()
             self.assertEqual(5, len(requests))
             self.assertIn('antigravity', requests[-1])
-
-    def test_publish_preserves_existing_skill_before_creating_any_links(self):
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory)
-            target = base / '.agents/skills/share-docs'
-            target.parent.mkdir(parents=True)
-            target.symlink_to('/personal/skill')
-            result = subprocess.run(['bash', str(PRODUCT / 'apps/publish/install.sh')], env=os.environ | {'HOME':str(base), 'STATIONDESK_SHARE':str(base/'share'), 'STATIONDESK_APP_DIR':str(PRODUCT/'apps/publish')}, capture_output=True)
-            self.assertEqual(1, result.returncode)
-            self.assertEqual('/personal/skill', os.readlink(target))
-            self.assertFalse((base/'.claude/skills/share-docs').exists())

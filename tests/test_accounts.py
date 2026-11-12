@@ -20,6 +20,67 @@ spec.loader.exec_module(accounts)
 
 
 class AccountsTests(unittest.TestCase):
+    def test_installed_account_panel_is_optional_and_removed_with_app(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(accounts, 'status_one',
+                side_effect=lambda agent: dict(id=agent, logged_in=False)):
+            self.assertNotIn('account_panel', accounts.status(directory))
+            panel = Path(directory) / 'web/accounts/porthole.json'
+            panel.parent.mkdir(parents=True)
+            panel.write_text(json.dumps(dict(account_panel='/stationdesk-accounts/panel.html?p=accounts&embed=1')))
+            configured = accounts.status(directory)
+            self.assertEqual('/stationdesk-accounts/panel.html?p=accounts&embed=1', configured['account_panel'])
+            self.assertEqual(4, len(configured['agents']))
+            panel.write_text('invalid json')
+            self.assertNotIn('account_panel', accounts.status(directory))
+            panel.unlink()
+            self.assertNotIn('account_panel', accounts.status(directory))
+
+    def test_account_alert_lights_the_ring_and_only_raises_it(self):
+        # A spent quota is graded by the installed accounts app; the ring follows the worse of
+        # sign-in state and that grade, and an unreadable grade changes nothing.
+        grades = {}
+
+        class Opened:
+            def __init__(self, url, timeout):
+                if url not in grades:
+                    raise OSError('refused')
+                self.body = json.dumps(grades[url]).encode()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return self.body
+
+        url = 'http://127.0.0.1:19904/acct-alert'
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(accounts, 'status_one', side_effect=lambda agent: dict(id=agent, logged_in=True)), \
+                patch.object(accounts.urllib.request, 'urlopen', Opened):
+            panel = Path(directory) / 'web/accounts/porthole.json'
+            panel.parent.mkdir(parents=True)
+            panel.write_text(json.dumps(dict(account_panel='/p', account_alert=url)))
+            self.assertEqual('ok', accounts.status(directory)['status'])
+            grades[url] = dict(ok=True, level='crit', reason='usage', use5h=None, use7d=100,
+                               reset7d='2026-11-08T13:00:00Z', thresholds={})
+            spent = accounts.status(directory)
+            self.assertEqual('critical', spent['status'])
+            self.assertEqual(dict(level='crit', reason='usage', use5h=None, use7d=100, reset5h=None,
+                                  reset7d='2026-11-08T13:00:00Z', rtDays=None, codexUse7d=None,
+                                  codexReset7d=None, thresholds={}), spent['account_alert'])
+            grades[url] = dict(level='warn', reason='usage', use7d=90)
+            self.assertEqual('warning', accounts.status(directory)['status'])
+            grades[url] = dict(level='none')
+            self.assertEqual('ok', accounts.status(directory)['status'])
+            panel.write_text(json.dumps(dict(account_panel='/p', account_alert='https://elsewhere.example/acct-alert')))
+            self.assertNotIn('account_alert', accounts.status(directory))
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(accounts, 'status_one', side_effect=lambda agent: dict(id=agent, logged_in=False)), \
+                patch.object(accounts.urllib.request, 'urlopen', Opened):
+            (Path(directory) / 'state').mkdir()
+            (Path(directory) / 'state/accounts.json').write_text(json.dumps(dict(logged_in=['claude'])))
+            panel = Path(directory) / 'web/accounts/porthole.json'
+            panel.parent.mkdir(parents=True)
+            panel.write_text(json.dumps(dict(account_panel='/p', account_alert=url)))
+            grades[url] = dict(level='warn', reason='usage', use7d=90)
+            self.assertEqual('critical', accounts.status(directory)['status'])
+
     def test_status_recognizes_logout_and_hides_output(self):
         samples = [('claude', '{"loggedIn":false,"email":"private"}', 1),
                    ('codex', 'Not logged in', 1),

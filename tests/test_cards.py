@@ -31,7 +31,7 @@ class CardTests(unittest.TestCase):
 
     def event(self, **kwargs):
         self.index += 1
-        return dict(id='e'+str(self.index),group='test',source='agent',level='normal',title='Hello',**kwargs)
+        return dict(dict(id='e'+str(self.index),group='test',source='agent',level='normal',title='Hello'),**kwargs)
 
     def test_merge_raise_only_reread_resolve_and_receipt_dedup(self):
         first = self.event(peek=True,body='a')
@@ -44,13 +44,73 @@ class CardTests(unittest.TestCase):
         self.cards.ingest(promoted)
         self.cards.ingest(self.event(body='b'))
         card = self.cards.feed()['messages'][0]
-        self.assertEqual((4,'urgent',True,None),(card['count'],card['level'],card['peek'],card['read_at']))
-        self.assertEqual({'active':1,'unread':1,'urgent':1,'archived':0},self.cards.feed()['counts'])
+        # The newest message sets the level: an urgent card falls back to normal.
+        self.assertEqual((4,'normal',True,None),(card['count'],card['level'],card['peek'],card['read_at']))
+        self.assertEqual({'active':1,'unread':1,'urgent':0,'archived':0},self.cards.feed()['counts'])
         self.cards.ingest(self.event(resolves=True))
         self.assertEqual([],self.cards.feed()['messages'])
         self.assertEqual(1,self.cards.feed()['counts']['archived'])
         self.cards.ingest(self.event())
         self.assertEqual(1,self.cards.feed()['counts']['active'])
+
+    def test_identical_fault_counts_without_renewing_peek_and_recovery_realerts(self):
+        first = self.event(peek=True, body='exit-code')
+        first['level'] = 'urgent'
+        with patch('cards.now', return_value='2026-11-02T00:00:00+00:00'):
+            self.cards.ingest(first)
+        with patch('cards.now', return_value='2026-11-02T00:03:00+00:00'):
+            self.cards.ingest(dict(first, id='repeat'))
+        card = self.cards.feed()['messages'][0]
+        self.assertEqual(2, card['count'])
+        self.assertEqual('2026-11-02T00:03:00+00:00', card['last_at'])
+        self.assertEqual('2026-11-02T00:00:00+00:00', card['peek_at'])
+        self.assertIsNone(card['read_at'])
+        with patch('cards.now', return_value='2026-11-02T00:06:00+00:00'):
+            self.cards.ingest(dict(first, id='different', body='timeout'))
+        self.assertEqual('2026-11-02T00:06:00+00:00', self.cards.feed()['messages'][0]['peek_at'])
+        self.cards.ingest(dict(first, id='recovery', resolves=True))
+        with patch('cards.now', return_value='2026-11-02T00:09:00+00:00'):
+            self.assertEqual('reopened', self.cards.ingest(dict(first, id='recurrence')))
+        card = self.cards.feed()['messages'][0]
+        self.assertEqual('2026-11-02T00:09:00+00:00', card['peek_at'])
+        self.assertEqual(4, card['count'])
+
+    def test_unit_stop_and_onfailure_pair_keep_description_and_one_peek(self):
+        fault = dict(self.event(peek=True, body='systemd result: exit-code'), level='urgent')
+        with patch('cards.now', return_value='2026-11-02T00:00:00+00:00'):
+            self.cards.ingest(fault)
+        for index in range(3):
+            with patch('cards.now', return_value=f'2026-11-02T00:0{index+1}:00+00:00'):
+                self.cards.ingest(dict(fault, id=f'stop-{index}'))
+                self.cards.ingest(dict(self.event(peek=True), level='urgent'))
+        card = self.cards.feed()['messages'][0]
+        self.assertEqual(7, card['count'])
+        self.assertEqual('systemd result: exit-code', card['body'])
+        self.assertEqual('2026-11-02T00:00:00+00:00', card['peek_at'])
+        self.cards.ingest(dict(self.event(peek=True, body='systemd result: timeout'), level='urgent'))
+        changed = self.cards.feed()['messages'][0]
+        self.assertNotEqual(card['peek_at'], changed['peek_at'])
+        self.cards.ingest(self.event(body=''))
+        self.assertEqual('', self.cards.feed()['messages'][0]['body'])
+
+    def test_old_database_migrates_and_retains_peek_baseline(self):
+        self.cards.ingest(self.event(peek=True))
+        before = self.cards.feed()['messages'][0]
+        with self.cards.db() as db:
+            db.execute('ALTER TABLE cards DROP COLUMN peek_at')
+        migrated = Cards(self.root)
+        self.assertEqual(before['last_at'], migrated.feed()['messages'][0]['peek_at'])
+        migrated.ingest(self.event(peek=True))
+        self.assertEqual(before['last_at'], Cards(self.root).feed()['messages'][0]['peek_at'])
+
+    def test_urgency_and_peek_promotion_renew_peek(self):
+        self.cards.ingest(self.event())
+        with patch('cards.now', return_value='2099-01-01T00:00:00+00:00'):
+            self.cards.ingest(self.event(peek=True))
+        self.assertEqual('2099-01-01T00:00:00+00:00', self.cards.feed()['messages'][0]['peek_at'])
+        with patch('cards.now', return_value='2099-01-01T00:03:00+00:00'):
+            self.cards.ingest(dict(self.event(peek=True), level='urgent'))
+        self.assertEqual('2099-01-01T00:03:00+00:00', self.cards.feed()['messages'][0]['peek_at'])
 
     def test_sweep_archives_idle_and_expires_old_receipts(self):
         first = self.event()
@@ -80,6 +140,15 @@ class CardTests(unittest.TestCase):
         self.assertEqual({'bad':1,'inserted':1},card_delivery.scan(self.cards,spool))
         self.assertEqual(1,len(list((spool/'bad').glob('*.reason'))))
         self.assertFalse(list((spool/'new').iterdir()))
+
+    def test_spool_does_not_follow_a_symlink_from_a_shared_writer(self):
+        spool = card_delivery.ensure_spool(self.root)
+        p = self.event()
+        target = self.root/'elsewhere.json'
+        target.write_text(json.dumps(p))
+        os.symlink(target,spool/'new'/(p['id']+'.json'))
+        self.assertEqual({'bad':1},card_delivery.scan(self.cards,spool))
+        self.assertEqual(0,self.cards.feed()['counts']['active'])
 
     def test_spool_preserves_fault_then_recovery_publication_order(self):
         spool = card_delivery.ensure_spool(self.root)
@@ -135,42 +204,184 @@ class CardTests(unittest.TestCase):
         card = self.cards.feed()['messages'][0]
         self.assertEqual((None,None,None),(card['ran_at'],card['ran_input'],card['ran_window']))
 
+    BOT = {'SLACK_BOT_TOKEN':'xoxb-test','SLACK_CHANNEL':'alerts'}
+
+    def slack_reply(self, body=b'{"ok":true,"ts":"1.0","channel":"C1"}'):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(body)
+        response.__enter__.return_value.status = 200
+        return response
+
     def test_reopen_during_recovery_send_keeps_new_alert(self):
         p = self.event(); p['level']='urgent'
         self.cards.ingest(p,grace=0)
-        hook = {'SLACK_WEBHOOK_URL':'http://example.test'}
-        response = unittest.mock.MagicMock()
-        response.__enter__.return_value.status = 200
-        with patch('urllib.request.urlopen',return_value=response):
-            card_delivery.send_slack(self.cards,hook)
+        with patch('urllib.request.urlopen',return_value=self.slack_reply()):
+            card_delivery.send_slack(self.cards,self.BOT)
         self.cards.ingest(self.event(resolves=True))
         def reopen_in_flight(*args,**kwargs):
             self.cards.ingest(dict(self.event(),level='urgent'),grace=0)
-            return response
+            return self.slack_reply(b'{"ok":true}')
         with patch('urllib.request.urlopen',side_effect=reopen_in_flight):
-            card_delivery.send_slack(self.cards,hook)
-        with patch('urllib.request.urlopen',return_value=response) as request:
-            self.assertEqual(1,card_delivery.send_slack(self.cards,hook))
+            card_delivery.send_slack(self.cards,self.BOT)
+        with patch('urllib.request.urlopen',return_value=self.slack_reply(b'{"ok":true}')) as request:
+            self.assertEqual(1,card_delivery.send_slack(self.cards,self.BOT))
             self.assertTrue(json.loads(request.call_args.args[0].data)['text'].startswith('🔴'))
 
     def test_reopened_card_alerts_again_after_grace(self):
         p = self.event(); p['level']='urgent'
         self.cards.ingest(p,grace=0)
-        response = unittest.mock.MagicMock()
-        response.__enter__.return_value.status = 200
-        hook = {'SLACK_WEBHOOK_URL':'http://example.test'}
-        with patch('urllib.request.urlopen',return_value=response) as request:
-            card_delivery.send_slack(self.cards,hook)
+        with patch('urllib.request.urlopen',side_effect=lambda *a,**k: self.slack_reply()) as request:
+            card_delivery.send_slack(self.cards,self.BOT)
             self.cards.ingest(self.event(resolves=True))
-            card_delivery.send_slack(self.cards,hook)
-            # A reopen within the grace sends nothing; after it, one new alert.
+            card_delivery.send_slack(self.cards,self.BOT)
+            # A reopen within the grace edits the same message back to red; after it, one new post.
             self.cards.ingest(dict(self.event(),level='urgent'))
-            self.assertEqual(0,card_delivery.send_slack(self.cards,hook))
+            self.assertEqual(1,card_delivery.send_slack(self.cards,self.BOT))
             self.cards.ingest(self.event(resolves=True))
             self.cards.ingest(dict(self.event(),level='urgent'),grace=0)
-            self.assertEqual(1,card_delivery.send_slack(self.cards,hook))
+            self.assertEqual(1,card_delivery.send_slack(self.cards,self.BOT))
+            self.assertEqual(0,card_delivery.send_slack(self.cards,self.BOT))
+            self.assertEqual(['chat.postMessage','chat.update','chat.update','chat.postMessage'],[c.args[0].full_url.rsplit('/',1)[1] for c in request.call_args_list])
+
+    def test_recovery_edits_by_channel_id_and_never_posts(self):
+        p = self.event(); p['level']='urgent'
+        self.cards.ingest(p,grace=0)
+        with patch('urllib.request.urlopen',side_effect=lambda *a,**k: self.slack_reply()) as request:
+            card_delivery.send_slack(self.cards,self.BOT)
+            self.assertEqual('alerts',json.loads(request.call_args.args[0].data)['channel'])
+            self.cards.ingest(self.event(resolves=True))
+            self.assertEqual(1,card_delivery.send_slack(self.cards,self.BOT))
+            call = request.call_args.args[0]
+            self.assertEqual('chat.update',call.full_url.rsplit('/',1)[1])
+            sent = json.loads(call.data)
+            self.assertEqual(('C1','1.0'),(sent['channel'],sent['ts']))
+            self.assertTrue(sent['text'].startswith('✅'))
+        # Recovered before it was sent: nothing goes out. Nor does a webhook get a follow-up.
+        p = self.event(group='quiet'); p['level']='urgent'
+        self.cards.ingest(p,grace=0)
+        self.cards.ingest(self.event(group='quiet',resolves=True))
+        hook = {'SLACK_WEBHOOK_URL':'http://example.test'}
+        with patch('urllib.request.urlopen',return_value=self.slack_reply(b'')) as request:
             self.assertEqual(0,card_delivery.send_slack(self.cards,hook))
-            self.assertEqual(['🔴','✅','🔴'],[json.loads(c.args[0].data)['text'][0] for c in request.call_args_list])
+            self.cards.ingest(dict(self.event(group='hook'),level='urgent'),grace=0)
+            self.assertEqual(1,card_delivery.send_slack(self.cards,hook))
+            self.cards.ingest(self.event(group='hook',resolves=True))
+            self.assertEqual(0,card_delivery.send_slack(self.cards,hook))
+            self.assertEqual(1,request.call_count)
+
+    def unit_fault(self, **kwargs):
+        return dict(self.event(), group='unit:x.service', source='systemd', level='urgent', title='App unit failed', **kwargs)
+
+    def age(self, **fields):
+        with self.cards.db() as db:
+            for column, delta in fields.items():
+                db.execute('UPDATE cards SET %s=? WHERE "group"=?' % column,
+                           ((datetime.now(timezone.utc)+delta).isoformat(), 'unit:x.service'))
+
+    def unit_sends(self):
+        with patch('urllib.request.urlopen',side_effect=lambda *a,**k: self.slack_reply()) as request:
+            card_delivery.send_slack(self.cards,self.BOT)
+        return request.call_count
+
+    def test_unit_fault_pages_only_after_a_fifteen_minute_episode(self):
+        self.cards.ingest(self.unit_fault())
+        self.assertEqual(0,self.unit_sends())
+        # Self-healed within the window: never paged.
+        self.cards.ingest(self.event(group='unit:x.service',resolves=True))
+        self.assertEqual(0,self.unit_sends())
+        # Fails again 10 minutes into the same episode: still not due.
+        self.age(episode_at=-timedelta(minutes=10), resolved_at=-timedelta(minutes=1))
+        self.cards.ingest(self.unit_fault())
+        self.assertEqual(0,self.unit_sends())
+        # ...and a flapping unit whose episode passes 15 minutes pages once.
+        self.cards.ingest(self.event(group='unit:x.service',resolves=True))
+        self.age(episode_at=-timedelta(minutes=16), resolved_at=-timedelta(minutes=1))
+        self.cards.ingest(self.unit_fault())
+        self.assertEqual(1,self.unit_sends())
+        # Recovery edits the page; a re-failure in the episode edits it back instead of posting.
+        self.cards.ingest(self.event(group='unit:x.service',resolves=True))
+        self.assertEqual(1,self.unit_sends())
+        self.cards.ingest(self.unit_fault())
+        with patch('urllib.request.urlopen',side_effect=lambda *a,**k: self.slack_reply()) as request:
+            self.assertEqual(1,card_delivery.send_slack(self.cards,self.BOT))
+            self.assertEqual('chat.update',request.call_args.args[0].full_url.rsplit('/',1)[1])
+        # Recovered for more than 15 minutes: the next failure is a new episode.
+        self.cards.ingest(self.event(group='unit:x.service',resolves=True))
+        self.age(resolved_at=-timedelta(minutes=20))
+        self.cards.ingest(self.unit_fault())
+        self.assertEqual(0,self.unit_sends())
+        card = self.cards.feed()['messages'][0]
+        self.assertIsNone(card['slack_ts'])
+        self.assertGreater(card['send_next_at'],datetime.now(timezone.utc).isoformat())
+
+    def test_webhook_episode_pages_once_across_flaps(self):
+        hook = {'SLACK_WEBHOOK_URL':'http://example.test'}
+        self.cards.ingest(self.unit_fault())
+        self.age(episode_at=-timedelta(minutes=16), send_next_at=-timedelta(minutes=1))
+        with patch('urllib.request.urlopen',side_effect=lambda *a,**k: self.slack_reply(b'')) as request:
+            self.assertEqual(1,card_delivery.send_slack(self.cards,hook))
+            self.cards.ingest(self.event(group='unit:x.service',resolves=True))
+            self.cards.ingest(self.unit_fault())
+            self.assertEqual(0,card_delivery.send_slack(self.cards,hook))
+            self.assertEqual(1,request.call_count)
+
+    def test_digest_counts_an_episode_once_and_drops_it_when_it_pages(self):
+        self.cards.ingest(self.unit_fault())
+        self.age(episode_at=-timedelta(minutes=16))
+        self.cards.ingest(self.event(group='unit:x.service',resolves=True))
+        self.cards.ingest(self.unit_fault())
+        self.cards.ingest(self.event(group='unit:x.service',resolves=True))
+        with self.cards.db() as db:
+            self.assertEqual(1,db.execute('SELECT COUNT(*) FROM quiet').fetchone()[0])
+        self.cards.ingest(self.unit_fault())
+        self.unit_sends()
+        self.assertIsNone(self.cards.digest())
+
+    def test_new_episode_posts_to_the_current_channel(self):
+        p = self.event(); p['level']='urgent'
+        self.cards.ingest(p,grace=0)
+        with patch('urllib.request.urlopen',side_effect=lambda *a,**k: self.slack_reply()):
+            card_delivery.send_slack(self.cards,self.BOT)
+            self.cards.ingest(self.event(resolves=True))
+            card_delivery.send_slack(self.cards,self.BOT)
+            self.cards.ingest(dict(self.event(),level='urgent'),grace=0)
+        with patch('urllib.request.urlopen',side_effect=lambda *a,**k: self.slack_reply()) as request:
+            card_delivery.send_slack(self.cards,dict(self.BOT,SLACK_CHANNEL='CNEW'))
+            self.assertEqual('CNEW',json.loads(request.call_args.args[0].data)['channel'])
+
+    def test_normal_reopen_does_not_turn_a_recovered_message_red(self):
+        p = self.event(); p['level']='urgent'
+        self.cards.ingest(p,grace=0)
+        with patch('urllib.request.urlopen',side_effect=lambda *a,**k: self.slack_reply()) as request:
+            card_delivery.send_slack(self.cards,self.BOT)
+            self.cards.ingest(self.event(resolves=True))
+            card_delivery.send_slack(self.cards,self.BOT)
+            self.cards.ingest(self.event())
+            self.assertEqual(0,card_delivery.send_slack(self.cards,self.BOT))
+            self.assertEqual(2,request.call_count)
+
+    def test_weekly_digest_counts_routine_events_once_a_week(self):
+        paged = self.event(group='paged'); paged['level']='urgent'
+        self.cards.ingest(paged,grace=0)
+        with patch('urllib.request.urlopen',side_effect=lambda *a,**k: self.slack_reply()):
+            card_delivery.send_slack(self.cards,self.BOT)
+        for _ in range(2):
+            self.cards.ingest(self.event(group='noise'))
+        flap = self.event(group='flap'); flap['level']='urgent'
+        self.cards.ingest(flap)
+        self.cards.ingest(self.event(group='flap',resolves=True))
+        pending = self.event(group='pending'); pending['level']='urgent'
+        self.cards.ingest(pending)
+        counts = self.cards.digest()
+        self.assertEqual({'noise':2,'flap':1},counts)
+        card = next(m for m in self.cards.feed()['messages'] if m['group'].startswith('digest:'))
+        self.assertEqual('normal',card['level'])
+        self.assertIn('noise ×2',card['body'])
+        self.assertNotIn('paged',card['body'])
+        self.assertIsNone(self.cards.digest())  # not again within the week
+        with patch('urllib.request.urlopen') as request:
+            card_delivery.send_slack(self.cards,self.BOT)
+            request.assert_not_called()
 
     def test_blip_during_first_alert_send_needs_no_second_alert(self):
         # The alert in flight already says this unit is failing, and no recovery was posted:
@@ -270,9 +481,8 @@ class CardTests(unittest.TestCase):
         with patch('urllib.request.urlopen',return_value=response) as request:
             self.assertEqual(1,card_delivery.send_slack(self.cards,{'SLACK_WEBHOOK_URL':'http://example.test'}))
             self.cards.ingest(self.event(resolves=True))
-            self.assertEqual(1,card_delivery.send_slack(self.cards,{'SLACK_WEBHOOK_URL':'http://example.test'}))
-            self.assertIn('Resolved',json.loads(request.call_args.args[0].data)['text'])
-            self.assertEqual(2,request.call_count)
+            self.assertEqual(0,card_delivery.send_slack(self.cards,{'SLACK_WEBHOOK_URL':'http://example.test'}))
+            self.assertEqual(1,request.call_count)
 
     def request(self,path,method='GET',data=None,owner='owner',token=None):
         h = object.__new__(handler.Handler)
@@ -286,7 +496,7 @@ class CardTests(unittest.TestCase):
         h.rfile = io.BytesIO(body)
         result = []
         h.reply = lambda *args: result.append(args)
-        with patch.dict(os.environ,{'STATIONDESK_ROOT':str(self.root),'STATIONDESK_OWNER':'owner'}):
+        with patch.dict(os.environ,{'STATIONDESK_ROOT':str(self.root),'STATIONDESK_OWNER':'owner','STATIONDESK_FQDN':''}):  # empty: same-origin falls back to Host
             getattr(h,'do_'+method)()
         return result[0]
 

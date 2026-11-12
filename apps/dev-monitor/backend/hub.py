@@ -1,6 +1,9 @@
 """Owner launcher state and app-store projection over the StationDesk ledger."""
 import hashlib
 import json
+import os
+import re
+import tempfile
 import importlib.machinery
 import importlib.util
 from pathlib import Path
@@ -44,6 +47,30 @@ class Hub:
         order = (home_order.read_order(installed, self.order_path) if value is None else
                  home_order.write_order(value, installed, self.order_path))
         return dict(order=order, installed=installed, required=sorted(REQUIRED))
+
+    def frame(self, color):
+        """Store this box's tab-icon colour name, or clear it with "".
+
+        nginx serves the file as /stationdesk-frame.json on every origin and
+        porthole.js maps the name to a colour, ignoring names it does not know.
+        """
+        if not isinstance(color, str) or not re.fullmatch(r'[a-z]{0,16}', color):
+            raise ValueError('bad_color')
+        path = self.root / 'state/frame.json'
+        with WRITE_LOCK:
+            if not color:
+                path.unlink(missing_ok=True)
+                return dict(color='')
+            descriptor, temporary = tempfile.mkstemp(prefix='.frame.', dir=path.parent)
+            try:
+                with os.fdopen(descriptor, 'w') as handle:
+                    os.fchmod(handle.fileno(), 0o644)
+                    json.dump(dict(color=color), handle)
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        return dict(color=color)
 
     def add_link(self, name, url):
         # Same personal-link input contract as the source launcher.
@@ -143,7 +170,7 @@ class Hub:
             rows.append(dict(id=app_id, name=manifest['label'], origin=origin, kind='app',
                              state=('update' if app_id in updating else 'installed') if app_id in installed else 'install',
                              icon=icon, desc=manifest.get('description', ''), desc_ko=manifest.get('description_ko', ''), source=source,
-                             visibility=manifest.get('visibility'), detail={'Path': str(directory)} if directory is not None else {}))
+                             visibility=manifest.get('visibility'), settings_script=manifest.get('settings_script', ''), detail={'Path': str(directory)} if directory is not None else {}))
         for app_id, link in self.links().items():
             rows.append(dict(id=app_id, name=link['name'], url=link['url'], origin='company' if app_id in company_links else 'link', kind='link', icon=link.get('icon', ''), glyph=link.get('glyph', ''), desc=link.get('desc', ''), source=link['url'], state='installed' if app_id in installed else 'install', detail={}))
         return dict(rows=rows, updates=updates, company_enabled=catalog.enabled)

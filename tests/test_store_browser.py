@@ -90,6 +90,59 @@ class StoreBrowserTests(unittest.TestCase):
                     page.close()
             browser.close()
 
+    def test_company_refresh_discovers_links_and_can_retry_after_failure(self):
+        source = (Path(__file__).parents[1] / 'hub/web/index.html').read_text()
+        modal = source[source.index('<div class="store-modal"'):source.index('<main>')]
+        script = source.split('<script>\n// Owner app store', 1)[1].split('</script>', 1)[0]
+        styles = '\n'.join(re.findall(r'<style[^>]*>(.*?)</style>', source, re.S))
+        tokens = (Path(__file__).parents[1] / 'hub/web/assets/stationdesk-tokens.css').read_text()
+        document = ('<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>' + tokens + styles + '</style><button id="store-open"><span id="store-badge"></span></button>'
+                    + modal + '<script>' + (Path(__file__).parents[1] / 'hub/web/assets/i18n.js').read_text() + '</script><script>async function j(){return {email:"owner@example.test"}};'
+                    'function stationdeskWhen(){return ""};function stationdeskIconNode(){return document.createElement("span")};'
+                    'window.stationdeskRefreshHubTiles=async()=>true;</script><script>// Owner app store' + script + '</script>')
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=['--no-sandbox'])
+            for width in (1440, 390):
+                with self.subTest(width=width):
+                    page = browser.new_page(viewport={'width': width, 'height': 900})
+                    errors, posts = [], []
+                    page.on('pageerror', lambda error: errors.append(str(error)))
+                    state = {'fresh': False, 'fail': True}
+                    def route(request):
+                        if request.request.url == 'https://station.test/':
+                            return request.fulfill(body=document, content_type='text/html')
+                        if request.request.method == 'POST':
+                            posts.append(request.request.url)
+                            if state['fail']:
+                                return request.fulfill(status=400, body=json.dumps({'error': 'Catalog unreachable'}), content_type='application/json')
+                            state['fresh'] = True
+                        rows = [{'id': 'existing', 'name': 'Existing app', 'origin': 'company', 'kind': 'app', 'state': 'installed'}]
+                        if state['fresh']:
+                            rows.append({'id': 'folio-prod', 'name': 'Folio', 'origin': 'company', 'kind': 'link', 'state': 'install'})
+                        request.fulfill(body=json.dumps({'company_enabled': True, 'rows': rows}), content_type='application/json')
+                    page.route('**/*', route)
+                    page.goto('https://station.test/')
+                    page.locator('#store-open').click()
+                    page.locator('#store-tab-company').click()
+                    button = page.get_by_role('button', name='Refresh list', exact=True)
+                    button.click()
+                    page.locator('#store-company-alert').filter(has_text='Catalog unreachable').wait_for()
+                    self.assertTrue(button.is_enabled())
+                    self.assertTrue(page.locator('[data-store-row=existing]').is_visible())
+                    self.assertEqual(0, page.locator('[data-store-row=folio-prod]').count())
+                    state['fail'] = False
+                    button.click()
+                    page.locator('#store-company-alert').filter(has_text='Company list refreshed.').wait_for()
+                    page.locator('[data-store-row=folio-prod]').get_by_role('button', name='Show on home').wait_for()
+                    self.assertTrue(button.is_enabled())
+                    self.assertEqual('true', page.locator('#store-tab-company').get_attribute('aria-selected'))
+                    self.assertEqual(2, len(posts))
+                    self.assertTrue(all(url.endswith('/monitor/api/owner/company/refresh') for url in posts))
+                    self.assertEqual([], errors)
+                    self.assertLessEqual(button.bounding_box()['x'] + button.bounding_box()['width'], width)
+                    page.close()
+            browser.close()
+
     def test_builtin_failure_stays_with_its_row_and_addon_failure_with_its_form(self):
         source = (Path(__file__).parents[1] / 'hub/web/index.html').read_text()
         modal = source[source.index('<div class="store-modal"'):source.index('<main>')]

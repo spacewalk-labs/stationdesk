@@ -18,6 +18,8 @@ class IndexingTests(unittest.TestCase):
         self.share = self.root / 'share'
         self.share.mkdir()
         (self.share / 'doc.html').write_text('<html><head><title>Doc</title></head><body>x</body></html>')
+        (self.root / 'state').mkdir()
+        (self.root / 'state/box.toml').write_text('funnel = true\n')  # the public entrance is on
         self.env = {'STATIONDESK_SHARE': str(self.share), 'STATIONDESK_OWNER': OWNER,
                     'STATIONDESK_FQDN': '', 'STATIONDESK_ROOT': str(self.root),
                     'STATIONDESK_PUBLISH_PUBLIC_MODE': 'local',

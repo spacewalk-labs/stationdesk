@@ -3,7 +3,7 @@ set -euo pipefail
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 product=$(cd -- "$here/../.." && pwd)
 out=${1:-"$PWD/dist"}
-version=${2:-0.1.3}
+version=${2:-0.1.4}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 app="$out/StationDesk Setup.app"

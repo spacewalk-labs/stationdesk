@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
+import time
 import uuid
 
 
@@ -15,6 +17,8 @@ def emit(root, card):
     card = dict(card, id=uuid.uuid4().hex)
     fd, temporary = tempfile.mkstemp(dir=spool / 'tmp')
     try:
+        # Another account's spool writer shares the directory, not the owner: readable by the collector.
+        os.fchmod(fd, 0o644)
         with os.fdopen(fd, 'w') as stream:
             json.dump(card, stream, ensure_ascii=False)
             stream.write('\n')
@@ -22,6 +26,24 @@ def emit(root, card):
     finally:
         Path(temporary).unlink(missing_ok=True)
     return card['id']
+
+
+def cause(result):
+    """One line saying why the unit failed: the last short non-JSON line it printed."""
+    invocation = os.environ.get('INVOCATION_ID')
+    for _ in range(4 if invocation else 0):
+        # The journal can trail the process by a moment; look again before giving up.
+        try:
+            out = subprocess.run(['journalctl', '_SYSTEMD_INVOCATION_ID=' + invocation, '-o', 'cat', '--no-pager', '-n', '40'],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ''
+        for line in reversed(out.splitlines()):
+            line = line.strip()
+            if line and not line.startswith(('{', '[')) and len(line) <= 400:
+                return line[:200]
+        time.sleep(0.5)
+    return 'systemd result: ' + result
 
 
 def main():
@@ -41,7 +63,7 @@ def main():
             return
         card = {'group': 'unit:' + args.unit_result, 'source': 'systemd',
                 'level': 'urgent', 'title': 'App unit failed: ' + args.unit_result,
-                'body': 'systemd result: ' + os.environ['SERVICE_RESULT'], 'peek': True}
+                'body': cause(os.environ['SERVICE_RESULT']), 'peek': True}
     else:
         if not args.group or not args.title:
             parser.error('--group and --title are required')

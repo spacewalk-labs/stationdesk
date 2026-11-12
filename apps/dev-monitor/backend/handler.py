@@ -121,7 +121,7 @@ class Handler(BaseHTTPRequestHandler):
         route = urlsplit(self.path).path
         ingest = route == '/api/ingest'
         if ingest:
-            token = self.headers.get('X-StationDesk-Token') or self.headers.get('Authorization', '').removeprefix('Bearer ')
+            token = self.headers.get('X-StationDesk-Token') or self.headers.get('X-Devmon-Ingest-Token') or self.headers.get('Authorization', '').removeprefix('Bearer ')
             if not token or not secrets.compare_digest(token, ingest_token(os.environ['STATIONDESK_ROOT'])):
                 return self.reply(401, {'error': 'Ingest token required'})
         elif not self.authorized() or not self.same_origin():
@@ -144,8 +144,18 @@ class Handler(BaseHTTPRequestHandler):
             if ingest:
                 return self.reply(202, {'status': Cards(root).ingest(data, grace(slack_config()))})
             hub = Hub(root)
+            if route == '/api/owner/company/refresh':
+                try:
+                    catalog = Catalog(root)
+                    catalog.fetch()
+                    catalog.project_icons()
+                except OSError as error:
+                    return self.reply(502, {'error': str(error)})
+                return self.reply(200, hub.apps())
             if route == '/api/owner/home/order':
                 return self.reply(200, hub.order(data['order']))
+            if route == '/api/owner/frame':
+                return self.reply(200, hub.frame(data.get('color')))
             if route == '/api/owner/apps/links/add':
                 return self.reply(200, hub.add_link(data.get('name'), data.get('url')))
             if route == '/api/owner/apps/remove-link':

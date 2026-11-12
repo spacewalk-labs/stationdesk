@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -32,7 +33,18 @@ class EngineTests(unittest.TestCase):
         self.calls = []
         self.fixture_ports = {"hub": 19920, "hello": 19940, "publish": 19924}
         self.fail_nginx = False
+        self.foreign_ports = set()  # held by another program: the nginx reload cannot bind them
         self.diff = 0
+        self.unit_not_loaded = False
+        # nginx holds every port its site.conf listens on, except ones another program holds.
+        ports_patch = patch.object(engine.Engine, 'nginx_ports', lambda engine_: {
+            int(port) for port in re.findall(r'listen 127\.0\.0\.1:(\d+);', (self.root / 'nginx/site.conf').read_text())
+        } - self.foreign_ports)
+        ports_patch.start()
+        self.addCleanup(ports_patch.stop)
+        holder_patch = patch.object(engine.Engine, 'port_holder', lambda engine_, port: 'old-ide pid 777')
+        holder_patch.start()
+        self.addCleanup(holder_patch.stop)
         command_patch = patch.object(engine, 'run', side_effect=self.command)
         command_patch.start()
         self.addCleanup(command_patch.stop)
@@ -52,10 +64,14 @@ class EngineTests(unittest.TestCase):
             code = self.diff
         elif args[:2] == ['tailscale', 'status']:
             output = '{}'
-        elif args[:2] == ['nginx', '-t'] and self.fail_nginx:
+        elif args[:2] == ['/usr/sbin/nginx', '-t'] and self.fail_nginx:
             code = 1
         elif args[:3] == ['systemctl', '--user', 'is-active']:
             output = 'active'
+        elif args[:3] == ['systemctl', '--user', 'show']:
+            output = 'not-found' if self.unit_not_loaded else 'loaded'
+        elif args[:3] in (['systemctl', '--user', 'stop'], ['systemctl', '--user', 'disable']) and self.unit_not_loaded:
+            code = 5
         return subprocess.CompletedProcess(args, code, output, 'fixture failure' if code else '')
 
     def fixture(self, app_id='hello', extra=''):
@@ -324,7 +340,7 @@ class EngineTests(unittest.TestCase):
             nonlocal running
             if args == ['systemctl', '--user', 'enable', '--now', 'stationdesk-nginx.service']:
                 running = True
-            if args[:3] == ['nginx', '-s', 'reload'] and not running:
+            if args[:3] == ['/usr/sbin/nginx', '-s', 'reload'] and not running:
                 return subprocess.CompletedProcess(args, 1, '', 'nginx.pid missing')
             return self.command(args, **kwargs)
         with patch.object(engine, 'run', side_effect=command):
@@ -359,6 +375,26 @@ class EngineTests(unittest.TestCase):
         for relative in ('share/user.txt', 'state/user.db', 'nginx/apps.d/user.conf', 'apps/hello/app.toml'):
             self.assertTrue((self.root / relative).is_file())
         self.assertEqual({}, self.engine.load()['apps'])
+
+    def test_remove_of_never_loaded_unit_succeeds(self):
+        self.fixture()
+        self.engine.add('hello')
+        self.unit_not_loaded = True
+        self.engine.remove('hello')
+        self.assertNotIn('hello', self.engine.load()['apps'])
+        self.assertFalse((self.engine.unit_dir / 'stationdesk-hello.service').exists())
+
+    def test_failed_remove_keeps_ledger_and_retry_finishes(self):
+        self.fixture(extra='files = ["runtime/hello-tool"]\n')
+        self.engine.add('hello')
+        (self.root / 'runtime/hello-tool').mkdir(parents=True, exist_ok=True)
+        with patch.object(self.engine, 'safe_remove', side_effect=PermissionError(13, 'Permission denied')):
+            with self.assertRaises(PermissionError):
+                self.engine.remove('hello')
+        self.assertIn('hello', self.engine.load()['apps'])
+        self.engine.remove('hello')
+        self.assertEqual({}, self.engine.load()['apps'])
+        self.assertFalse((self.root / 'runtime/hello-tool').exists())
 
     def test_vanished_source_does_not_block_other_removals(self):
         # sd-box 2026-10-27: a company folder deleted under installed apps made every
@@ -430,7 +466,7 @@ class EngineTests(unittest.TestCase):
             self.engine.project()
         self.assertEqual(before, (fragment.read_bytes(), tiles.read_bytes()))
         self.assertFalse((fragment.parent / 'second.conf').exists())
-        self.assertNotIn(['nginx', '-s', 'reload'], [a for a, _ in self.calls])
+        self.assertNotIn(['/usr/sbin/nginx', '-s', 'reload'], [a for a, _ in self.calls])
 
     def test_remove_nginx_failure_restores_removed_fragment(self):
         self.fixture()
@@ -584,6 +620,63 @@ class EngineTests(unittest.TestCase):
                 self.assertEqual(['tailscale', 'serve', '--bg', '--https=443', 'http://127.0.0.1:19920'],
                                  command.call_args.args[0])
 
+    def test_tagged_node_takes_owner_from_box_toml(self):
+        # A tagged node's User record is the node itself, not a person.
+        (self.root / 'state/box.toml').write_text('owner = "owner@example.test"\n')
+        status = {'Self': {'UserID': 7, 'DNSName': 'desk.example.test.', 'Tags': ['tag:mgmt']},
+                  'User': {'7': {'LoginName': 'desk.example.test'}}}
+        with patch.object(engine.shutil, 'which', return_value='/usr/bin/tailscale'):
+            with patch.object(engine, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(status), '')):
+                self.assertEqual(('owner@example.test', 'desk.example.test'), self.engine.identity())
+
+    def test_identity_falls_back_to_box_toml_for_owner_and_fqdn_without_tailnet(self):
+        (self.root / 'state/box.toml').write_text('owner = "owner@example.test"\nfqdn = "box.example.test"\n')
+        self.assertEqual(('owner@example.test', 'box.example.test'), self.engine.identity())
+        self.engine.serve()  # the address is configured, but tailscale does not have the box
+        self.assertFalse([c for c, _ in self.calls if c[:2] == ['tailscale', 'serve']])
+
+    def test_serve_retries_under_sudo_when_path_handler_blocks_operator(self):
+        self.fixture('hub')
+        status = {'Self': {'UserID': 42, 'DNSName': 'desk.example.test.'},
+                  'User': {'42': {'LoginName': 'live@example.test'}}}
+        refusal = "401 Unauthorized: must be root, or be an operator and able to run 'sudo tailscale' to serve a path or Unix socket"
+        serve_status = {'Foreground': {'session-1': {'Web': {'desk.example.test:8610': {'Handlers': {'/fleet/': {'Path': '/srv/fleet'}}}}}}}
+        sudo_ok = [True]
+        calls = []
+        def fake(args, **kwargs):
+            calls.append(args)
+            if args[:3] == ['tailscale', 'status', '--json']:
+                return subprocess.CompletedProcess(args, 0, json.dumps(status), '')
+            if args[:4] == ['tailscale', 'serve', 'status', '--json']:
+                return subprocess.CompletedProcess(args, 0, json.dumps(serve_status), '')
+            if args[0] == 'tailscale':
+                return subprocess.CompletedProcess(args, 1, '', refusal)
+            return subprocess.CompletedProcess(args, 0 if sudo_ok[0] else 1, '', '' if sudo_ok[0] else 'sudo: a password is required')
+        with patch.object(engine.shutil, 'which', return_value='/usr/bin/tailscale'), \
+                patch.object(engine, 'run', side_effect=fake):
+            self.engine.serve()
+            self.assertIn(['sudo', '-n', 'tailscale', 'serve', '--bg', '--https=443', 'http://127.0.0.1:19920'], calls)
+            sudo_ok[0] = False
+            with self.assertRaises(RuntimeError) as raised:
+                self.engine.serve()
+            self.assertIn('desk.example.test:8610/fleet/ -> /srv/fleet', str(raised.exception))
+
+    def test_serve_other_tailscale_errors_are_not_retried(self):
+        self.fixture('hub')
+        status = {'Self': {'UserID': 42, 'DNSName': 'desk.example.test.'},
+                  'User': {'42': {'LoginName': 'live@example.test'}}}
+        calls = []
+        def fake(args, **kwargs):
+            calls.append(args)
+            if args[:3] == ['tailscale', 'status', '--json']:
+                return subprocess.CompletedProcess(args, 0, json.dumps(status), '')
+            return subprocess.CompletedProcess(args, 1, '', 'port in use')
+        with patch.object(engine.shutil, 'which', return_value='/usr/bin/tailscale'), \
+                patch.object(engine, 'run', side_effect=fake):
+            with self.assertRaises(RuntimeError):
+                self.engine.serve()
+        self.assertFalse([a for a in calls if a[0] == 'sudo'])
+
     def test_own_port_gate_mapping_and_removal(self):
         app = self.fixture('publish', 'serve = 8000\n')
         (app / 'nginx/serve.conf').write_text('location / { root ${STATIONDESK_SHARE}; }')
@@ -609,6 +702,32 @@ class EngineTests(unittest.TestCase):
             self.assertFalse((fragment.parent / 'publish-serve.conf').exists())
             self.assertNotIn('19925', (self.root / 'nginx/site.conf').read_text())
             self.assertIn(['tailscale', 'serve', '--https=8000', 'off'], [a for a, _ in self.calls])
+
+    def test_gate_port_held_by_another_program_is_not_served(self):
+        # 2026-11-05: nginx reload kept the old config (19933 held by an old IDE) and the
+        # tailnet mapping still went to 19933, reaching the IDE without the owner gate.
+        app = self.fixture('publish', 'serve = 8000\n')
+        (app / 'nginx/serve.conf').write_text('location / { root ${STATIONDESK_SHARE}; }')
+        status = {'Self': {'UserID': 42, 'DNSName': 'desk.example.test.'},
+                  'User': {'42': {'LoginName': 'owner@example.test'}}}
+        original = self.command
+        def command(args, **kwargs):
+            if args[:2] == ['tailscale', 'status']:
+                return subprocess.CompletedProcess(args, 0, json.dumps(status), '')
+            return original(args, **kwargs)
+        self.foreign_ports = {19925}
+        with patch.object(engine.shutil, 'which', return_value='/usr/bin/tailscale'), \
+                patch.object(engine, 'run', side_effect=command), patch.object(engine.time, 'sleep'):
+            with self.assertRaises(RuntimeError) as raised:
+                self.engine.add('publish')
+            self.assertIn('19925 (old-ide pid 777)', str(raised.exception))
+            self.assertFalse([a for a, _ in self.calls if a[:2] == ['tailscale', 'serve']])
+            site = self.root / 'nginx/site.conf'
+            self.assertFalse(site.exists() and '19925' in site.read_text())
+            self.foreign_ports = set()
+            self.engine.add('publish')
+            self.assertIn(['tailscale', 'serve', '--bg', '--https=8000',
+                           'http://127.0.0.1:19925'], [a for a, _ in self.calls])
 
     def test_own_port_backend_without_nginx_fragment(self):
         app = self.fixture('standalone', 'serve = 8444\n')
@@ -651,6 +770,31 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(expected, normalized)
         self.assertNotIn('apps.d/*', rendered)
 
+    def read_hook_site(self, box):
+        self.fixture('hello', 'serve = 8001\n')
+        self.fixture('other', 'serve = 8002\n')
+        (self.root / 'state/box.toml').write_text('owner = "owner@example.test"\n' + box)
+        return self.engine.render_site({'hub': {}, 'hello': {}, 'other': {}})
+
+    def test_read_hook_off_keeps_owner_only_serve_ports(self):
+        site = self.read_hook_site('')
+        self.assertNotIn('stationdesk_reader', site)
+        self.assertEqual(2, site.count('if ($http_tailscale_user_login != "owner@example.test") { return 403; }\n    include'))
+
+    def test_read_hook_widens_only_listed_apps_to_get_head_of_one_domain(self):
+        site = self.read_hook_site('[read]\ndomain = "corp.example.test"\napps = ["hello"]\n')
+        self.assertIn('"~*^[^@]+@corp\\.example\\.test:(GET|HEAD)$" 1;', site)
+        hello, other = [part for part in site.split('server {') if 'hello-serve' in part or 'other-serve' in part]
+        self.assertIn('if ($stationdesk_reader = 1)', hello)
+        self.assertIn('if ($http_tailscale_user_login != "owner@example.test") { return 403; }', other)
+        self.assertNotIn('stationdesk_reader', other)
+        # The hub server (443) keeps its owner-only gate.
+        self.assertNotIn('stationdesk_reader', site.split('server {')[1])
+
+    def test_read_hook_rejects_malformed_domain(self):
+        with self.assertRaisesRegex(ValueError, 'malformed'):
+            self.read_hook_site('[read]\ndomain = "x; return 200"\napps = ["hello"]\n')
+
     def test_site_and_fragment_rollback_together(self):
         self.fixture('hello')
         self.engine.add('hello')
@@ -683,6 +827,45 @@ class EngineTests(unittest.TestCase):
                 self.assertEqual(1, self.engine.doctor())
         self.assertIn('확인 4 · 실패 1', output.getvalue())
         self.assertIn('hello anonymous: OK', output.getvalue())
+
+    def test_doctor_skips_https_probes_for_a_configured_but_absent_tailnet(self):
+        (self.root / 'state/box.toml').write_text('owner = "owner@example.test"\nfqdn = "box.example.test"\n')
+        self.engine.add('hub')
+        urls = []
+        def probes(args, **kwargs):
+            urls.extend(str(x) for x in args)
+            if args[0] == 'curl':
+                code = '200' if 'Tailscale-User-Login: owner@example.test' in args else '403'
+                return subprocess.CompletedProcess(args, 0, code, '')
+            return self.command(args, **kwargs)
+        with patch.object(engine, 'run', side_effect=probes):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.engine.doctor()
+        self.assertFalse([u for u in urls if u.startswith('https://box.example.test')])
+
+    def test_doctor_on_a_tagged_node_counts_the_gate_refusing_its_own_tailnet_request(self):
+        # The box's own tailnet requests carry the tagged node, not the owner, so the gate refuses them.
+        (self.root / 'state/box.toml').write_text('owner = "owner@example.test"\n')
+        self.engine.add('hub')
+        status = {'Self': {'UserID': 7, 'DNSName': 'box.example.test.', 'Tags': ['tag:mgmt']},
+                  'User': {'7': {'LoginName': 'box.example.test'}}}
+        def probes(args, tailnet, **kwargs):
+            if args[0] == 'tailscale':
+                return subprocess.CompletedProcess(args, 0, json.dumps(status), '')
+            if args[0] == 'curl':
+                url = args[-1]
+                if url.startswith('https://'):
+                    return subprocess.CompletedProcess(args, 0, f'{tailnet} {url}', '')
+                code = '200' if 'Tailscale-User-Login: owner@example.test' in args else '403'
+                return subprocess.CompletedProcess(args, 0, f'{code} {url}', '')
+            return self.command(args, **kwargs)
+        with patch.object(engine.shutil, 'which', return_value='/usr/bin/tailscale'):
+            for tags, tailnet, result in ((['tag:mgmt'], '403', 0), (['tag:mgmt'], '502', 1), (None, '403', 1)):
+                status['Self']['Tags'] = tags  # untagged: the box is the owner, so a refusal is a real failure
+                with patch.object(engine, 'run', side_effect=lambda args, **kw: probes(args, tailnet, **kw)):
+                    with contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(result, self.engine.doctor(), output.getvalue())
+                self.assertIn('hub serve: ' + ('OK' if result == 0 else 'FAIL'), output.getvalue())
 
     def test_builtin_id_from_repository_directory_keeps_builtin_origin(self):
         with contextlib.chdir(self.root):

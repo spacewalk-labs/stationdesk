@@ -3,3 +3,4 @@ description = "System status"
 description_ko = "시스템 상태"
 icon = "icon.svg"
 port = 19932
+endpoints = "dev-monitor/endpoints.json"

@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <script>
-// StationDesk serves fileview on the same nginx origin; Orca is outside this product.
-window.__DEVTERM = { fileview: true };
+// StationDesk serves fileview on the same nginx origin. The gate flips the orca flag below
+// when the Orca app's CLI is installed (worktree sidebar).
+window.__DEVTERM = { fileview: true, orca: false };
 </script>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -147,6 +148,86 @@ window.__DEVTERM = { fileview: true };
   #app.mkeys-collapsed #mkeys .mk-row > button:not(.mk-toggle):not(.mk-keep) { display: none; }
   #mkeys button.mk-toggle.on { color: #8bb8ff; background: #26304a; border-color: #3e5a86; }   /* expanded state */
 
+  /* ---- experimental layout: left sidebar (shell sessions) + top agent launcher.
+     JS tabPrefs.layout='sidebar' (default = tabs, auto-fallback on phones). ---- */
+  #sidebar { display: none; }
+  #app.sidebar-on { display: grid; grid-template-columns: 200px minmax(0, 1fr); grid-template-rows: auto 1fr auto;
+                    grid-template-areas: "side tabs" "side term" "side mkeys"; }
+  #app.sidebar-on > #sidebar { grid-area: side; display: flex; flex-direction: column; min-height: 0;
+                    overflow-y: auto; background: #171b26; border-right: 1px solid #2a3142;
+                    padding: calc(4px + env(safe-area-inset-top)) 6px 8px calc(6px + env(safe-area-inset-left)); }
+  #app.sidebar-on > #tabs  { grid-area: tabs; }
+  #app.sidebar-on > #term  { grid-area: term; }
+  #app.sidebar-on > #mkeys { grid-area: mkeys; }
+  /* section headers (projects / other sessions) = small dim chrome */
+  #sidebar .side-hd { font: 700 10px system-ui; letter-spacing: .06em; text-transform: uppercase; color: #6b7280; padding: 2px 4px; margin-top: 8px; }
+  #sidebar .side-row { display: flex; gap: 5px; margin: 8px 0 2px; }
+  /* shared sidebar button (other sessions, etc) */
+  #sidebar button { flex: 0 0 auto; height: 32px; border: 1px solid rgba(255,255,255,.08); border-radius: 6px;
+                    background: #2b3140; color: #cfd3db; font: 12.5px/1 system-ui, sans-serif;
+                    touch-action: manipulation; user-select: none; }
+  #sidebar button:active { background: #343c4c; }
+  #sidebar button.tab { position: relative; width: 100%; padding: 0 11px 0 12px; text-align: left; box-sizing: border-box; margin: 2px 0;
+                        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: #dfe4ec; }
+  #sidebar button.tab.colored::before { content: ''; position: absolute; left: 4px; top: 50%; transform: translateY(-50%);
+                        width: 3px; height: 17px; border-radius: 2px; background: var(--tab-color); }
+  #sidebar button.tab.on { color: #fff; background: #3a4150; border-color: #5b6475; }
+  #sidebar button.tab.drop-before { box-shadow: inset 0 3px 0 #6ea8ff; }
+  #sidebar button.tab.drop-after  { box-shadow: inset 0 -3px 0 #6ea8ff; }
+  #sidebar button.tab.drag-src { opacity: .4; }
+  #sidebar .mini.dots { color: #9a9fac; text-align: left; padding: 0 10px; margin: 2px 0; }
+  #sidebar .sqbtn { width: 32px; min-width: 32px; padding: 0; display: inline-flex; align-items: center;
+                    justify-content: center; color: #aeb4c0; }
+  #sidebar .sqbtn svg { width: 18px; height: 18px; display: block; }
+  /* project header (folder icon + repo name + plus) */
+  #sidebar .side-repo { display: flex; align-items: center; gap: 6px; margin: 16px 2px 6px 4px; }
+  #sidebar .side-repo.side-projects { margin: 2px 2px 6px 4px; padding-bottom: 8px; border-bottom: 1px solid #232838; }
+  #sidebar .side-repo:not(.side-projects) { border-top: 1px solid #232838; padding-top: 12px; }
+  #sidebar .side-repo-name { flex: 1; font: 700 13px system-ui; color: #f2f5fa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sidebar .side-projects .side-repo-name { font: 700 10px system-ui; letter-spacing: .06em; text-transform: uppercase; color: #6b7280; }
+  #sidebar .side-repo-icon { width: 14px; height: 14px; flex: 0 0 auto; color: #6b7280; display: inline-flex; }
+  #sidebar .side-repo-icon svg { width: 14px; height: 14px; display: block; }
+  #sidebar .side-repo-add { width: 24px; min-width: 24px; height: 24px; }
+  #sidebar .side-repo-add svg { width: 15px; height: 15px; }
+  /* worktree card */
+  #sidebar button.wt { position: relative; display: block; width: 100%; height: auto; text-align: left; box-sizing: border-box;
+                       padding: 7px 10px; margin: 3px 0; background: #232936; border: 1px solid rgba(255,255,255,.05); border-radius: 7px;
+                       transition: background .12s ease, border-color .12s ease; }
+  #sidebar button.wt:hover { background: #333a49; border-color: rgba(255,255,255,.14); }
+  #sidebar button.wt:active { background: #3a4150; }
+  #sidebar button.wt.on { background: #243046; border-color: #3e5a86; }
+  #sidebar button.wt.on .wt-name { color: #fff; }
+  #sidebar button.wt.current::before { content: ''; position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 0 2px 2px 0; background: #8bb8ff; }
+  #sidebar .wt-name { display: flex; align-items: center; font: 600 13px system-ui; color: #e6eaf2; overflow: hidden; }
+  #sidebar .wt-name .wt-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sidebar .wt-branch { font: 11px ui-monospace, Menlo, monospace; color: #6f7890; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+  #sidebar .wt-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; flex: 0 0 auto; box-shadow: 0 0 0 2px rgba(0,0,0,.3); }
+  /* worktree child sessions — left guide line + status */
+  #sidebar button.wt-agent { position: relative; display: block; width: 100%; height: 28px; text-align: left; box-sizing: border-box;
+                             margin: 1px 0 1px 13px; padding: 0 10px 0 14px; background: transparent;
+                             border: 1px solid transparent; border-left: 2px solid #2a3142; border-radius: 0 6px 6px 0;
+                             color: #aab1c0; font: 500 12px system-ui; transition: background .12s ease; }
+  #sidebar button.wt-agent:hover { background: #232936; }
+  #sidebar button.wt-agent:active { background: #2b3140; }
+  #sidebar button.wt-agent.on { color: #cfe0ff; background: #26304a; border-left-color: #6ea8ff; }
+  @keyframes dt-pulse { 0%,100% { opacity: .5; } 50% { opacity: 1; } }
+  #sidebar button.wt-agent.starting { animation: dt-pulse 1s ease-in-out infinite; color: #e2c37b; border-left-color: #e2c37b; }
+  /* top launcher bar (sidebar mode) — visually unified with the left tree */
+  #app.sidebar-on #tabs .agentbar-ctx { display: inline-flex; align-items: center; flex: 0 0 auto; align-self: center;
+                        font: 700 12px system-ui; color: #cfd3db; padding: 0 10px 0 2px; white-space: nowrap; }
+  #app.sidebar-on #tabs .agentbar-ctx .ctx-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; flex: 0 0 auto; box-shadow: 0 0 0 2px rgba(0,0,0,.3); }
+  #app.sidebar-on #tabs .agentbar-hint { align-self: center; color: #7b8296; font: 12.5px system-ui; padding-left: 4px; }
+  #app.sidebar-on #tabs button.tab.agent { position: relative; width: auto; min-width: 84px; height: 34px; border-radius: 7px; padding: 0 26px 0 18px; }
+  #app.sidebar-on #tabs button.tab.agent:not(.shell)::before { content: ''; position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
+                        width: 3px; height: 15px; border-radius: 2px; background: #8bb8ff; }
+  #app.sidebar-on #tabs button.tab.agent.shell { min-width: 68px; padding: 0 14px; color: #cfd3db; }
+  #app.sidebar-on #tabs button.tab.agent:not(.live):not(.on) { opacity: .72; }
+  #app.sidebar-on #tabs button.tab.agent.live::after { content: ''; position: absolute; right: 9px; top: 50%;
+                        transform: translateY(-50%); width: 6px; height: 6px; border-radius: 50%;
+                        background: #7fd6a0; box-shadow: 0 0 6px rgba(127,214,160,.7); }
+  #app.sidebar-on #tabs button.tab.agent.starting::after { content: ''; position: absolute; right: 9px; top: 50%;
+                        transform: translateY(-50%); width: 6px; height: 6px; border-radius: 50%; background: #e2c37b; animation: dt-pulse 1s ease-in-out infinite; }
+  /* terminal-switch loading overlay — freezes the old screen during the reconnect/agent-boot gap */
   /* terminal-switch loading overlay — freezes the old screen during the reconnect/agent-boot gap */
   #term { position: relative; }
   #termdim { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center;
@@ -159,6 +240,7 @@ window.__DEVTERM = { fileview: true };
 </head>
 <body>
 <div id="app">
+  <div id="sidebar"></div>
   <div id="tabs">
     <img id="terminal-icon" src="favicon.svg" alt="" title="Terminal">
     <div id="tabnames"></div>

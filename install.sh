@@ -35,8 +35,10 @@ if shutil.which('tailscale'):
     if result.returncode == 0:
         status = json.loads(result.stdout)
         self = status.get('Self') or {}
-        user = status.get('User', {}).get(str(self.get('UserID')), {})
-        owner = user.get('LoginName', '') or self.get('LoginName', '')
+        user = (status.get('User') or {}).get(str(self.get('UserID')), {})
+        # A tagged node's login names the node, not a person: its owner comes from box.toml.
+        if not self.get('Tags'):
+            owner = user.get('LoginName', '') or self.get('LoginName', '')
         fqdn = self.get('DNSName', '').rstrip('.')
 box = Path(sys.argv[1]) / 'state/box.toml'
 if box.exists():
@@ -44,7 +46,7 @@ if box.exists():
     owner = owner or values.get('owner', '')
     fqdn = fqdn or values.get('fqdn', '')
 if not owner:
-    sys.exit('Log in to Tailscale before installing StationDesk.')
+    sys.exit('Log in to Tailscale before installing StationDesk (on a tagged node, set owner in state/box.toml).')
 print(fqdn)
 PY
 )

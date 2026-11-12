@@ -64,6 +64,24 @@ class SiteTests(unittest.TestCase):
         self.assertEqual(('local', 'https://docs.example.test', str(self.share)),
                          (site['destination'], site['base_url'], site['share_dir']))
 
+    def test_company_favicon_beats_the_product_icon_but_not_the_owner_setting(self):
+        (self.root / 'company/icons').mkdir(parents=True)
+        (self.root / 'company/index.json').write_text('{"favicon": "icons/favicon.png"}')
+        (self.root / 'company/icons/favicon.png').write_bytes(PNG)
+        (self.root / 'state').mkdir()
+        (self.root / 'state/box.toml').write_text('company = "https://company.example.test/"\n')
+        app = self.load()
+        site = app.SITE
+        self.assertEqual('data:image/png;base64,' + base64.b64encode(PNG).decode(), site['favicon'])
+        self.assertEqual(str(self.root / 'company/icons/favicon.png'), site['favicon_source'])
+        # A running app follows the catalog: disconnecting changes the next page without a restart.
+        (self.root / 'state/box.toml').write_text('')
+        self.assertTrue(app.site_settings()['favicon'].startswith('data:image/svg+xml'))
+        (self.root / 'state/own.svg').write_text('<svg/>')
+        self.assertTrue(self.load(STATIONDESK_PUBLISH_FAVICON='own.svg').SITE['favicon'].startswith('data:image/svg+xml'))
+        (self.root / 'state/box.toml').write_text('')
+        self.assertTrue(self.load().SITE['favicon'].startswith('data:image/svg+xml'))
+
     def test_unusable_favicon_falls_back_and_says_why(self):
         for value in ('missing.png', 'notes.txt'):
             (self.root / 'notes.txt').write_text('x')

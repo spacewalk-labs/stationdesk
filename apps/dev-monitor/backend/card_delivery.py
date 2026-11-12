@@ -60,7 +60,10 @@ def scan(cards, spool, delay=300):
             # Refuse non-files without opening a producer FIFO and stalling the loop.
             if not stat.S_ISREG(path.lstat().st_mode):
                 raise ValueError('Expected regular JSON file')
-            payload = json.loads(path.read_bytes())
+            # A writer account shares new/; never follow a link it swaps in after the lstat.
+            fd = os.open(path, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            with os.fdopen(fd,'rb') as handle:
+                payload = json.loads(handle.read())
             if payload.get('id')+'.json' != path.name:
                 raise ValueError('Filename must match card id')
             status = cards.ingest(payload,delay)
@@ -91,6 +94,11 @@ def send_slack(cards, env):
         return 0
     card = cards.card(row)
     resolved = bool(card['resolved_at'])
+    if resolved and not (bot and card['slack_ts']):
+        # Recovery edits a message that was sent; it never posts a new one (nor a webhook follow-up).
+        with cards.db() as db:
+            db.execute('UPDATE cards SET send_next_at=NULL WHERE card_id=? AND resolved_at IS NOT NULL',(card['card_id'],))
+        return 0
     def escape(value):
         return str(value).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
     text = ('✅ Resolved: ' if resolved else '🔴 ') + escape(card['title'])
@@ -100,16 +108,16 @@ def send_slack(cards, env):
     payload = {'text':text}
     headers = {'Content-Type':'application/json'}
     if bot:
-        method = 'chat.update' if resolved and card['slack_ts'] else 'chat.postMessage'
+        # An edit needs the channel ID that chat.postMessage returned; SLACK_CHANNEL may be a name.
+        method = 'chat.update' if card['slack_ts'] else 'chat.postMessage'
         url = 'https://slack.com/api/'+method
-        payload['channel'] = channel
+        payload['channel'] = card['slack_channel'] or channel if card['slack_ts'] else channel
         if method == 'chat.update':
             payload['ts'] = card['slack_ts']
         headers['Authorization'] = 'Bearer '+token
     else:
-        # Incoming webhooks cannot edit a message: emit its resolved follow-up.
         url = webhook
-    ok,ts = False,None
+    ok,ts,channel_id = False,None,None
     retry = 30*2**min(card['send_attempts'],6)
     request = urllib.request.Request(url,data=json.dumps(payload).encode(),headers=headers)
     try:
@@ -119,6 +127,7 @@ def send_slack(cards, env):
                 result = json.load(response)
                 ok = isinstance(result, dict) and result.get('ok') is True
                 ts = result.get('ts') if isinstance(result, dict) else None
+                channel_id = result.get('channel') if isinstance(result, dict) else None
     except urllib.error.HTTPError as error:
         if error.code == 429:
             try:
@@ -136,9 +145,13 @@ def send_slack(cards, env):
         # after a successful initial send, and let a manual archive cancel retries.
         recovered = ok and current['resolved_at'] and not resolved
         next_at = now() if recovered else None if ok or current['archived_at'] else (datetime.now(timezone.utc)+timedelta(seconds=retry)).isoformat()
+        if ok:
+            # A paged episode is no longer routine for the weekly digest.
+            db.execute('DELETE FROM quiet WHERE "group"=? AND episode_at=COALESCE((SELECT episode_at FROM cards WHERE card_id=?),?)',(card['group'],card['card_id'],card['first_at']))
         db.execute('''UPDATE cards SET sent_at=?,send_next_at=?,send_attempts=send_attempts+1,
-           slack_ts=COALESCE(?,slack_ts) WHERE card_id=?''',
-           (now() if ok and not recovered else None,next_at,ts,card['card_id']))
+           slack_ts=COALESCE(?,slack_ts),slack_channel=COALESCE(?,slack_channel),
+           paged_at=COALESCE(paged_at,CASE WHEN ? THEN ? END) WHERE card_id=?''',
+           (now() if ok and not recovered else None,next_at,ts,channel_id if isinstance(channel_id,str) else None,int(ok),now(),card['card_id']))
     return int(ok)
 
 
@@ -161,6 +174,7 @@ def start(root):
                 send_slack(cards,env)
                 if ticks%1800 == 0:
                     cards.sweep()
+                    cards.digest()
                 ticks += 1
             except (OSError,ValueError,sqlite3.Error) as error:
                 # Never print payloads, prompts, webhook URLs or credentials.

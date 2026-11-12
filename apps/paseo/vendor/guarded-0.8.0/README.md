@@ -352,3 +352,32 @@ These fixes are baked into the shipped archive and checked by the installer.
 They do not depend on modifying an existing development box. Existing installs
 receive them on a normal StationDesk app update; this source change itself does
 not deploy or restart any running box.
+
+
+The server also includes the startup crash-recovery overlay from `../../patches/crash-recovery.*`.
+It restores interrupted running conversations through the existing guarded send and durable request
+journal, while preserving explicit Stop, permission waits and uncertain external outcomes. It adds
+no recurring watcher. The editable source and reconstruction step are documented in `source/README.md`.
+
+`codex-subagent-activity` is baked into `agent/providers/codex-app-server-agent.js`
+(2026-11-06), backporting the parent-card behavior of upstream
+[`184ab66cd`](https://github.com/getpaseo/paseo/commit/184ab66cdea7680018f06c490c3f056cc194f8a2).
+Each child delta previously rendered the entire accumulated child activity into a
+new parent `sub_agent.detail.log`, and every older snapshot remained in the
+parent timeline. Retained text therefore grew quadratically even though the
+child's own timeline already contained all of it. Parent cards now keep the
+wire-compatible `log: ""` and emit only status or label changes; child messages,
+tools, nested routing and restored histories remain in their dedicated timelines.
+The behavior/memory test drives the real notification parser, stream coalescer
+and both stores: 600 KiB of child text retained about 185 MB before this overlay
+and less than 1 MB after it. Only this server archive member changes, with both
+checksum manifests updated. No heap limit or unload setting changes.
+
+`claude-stream-retention` is baked into `agent/providers/claude/agent.js`
+(2026-11-06). The assembler slices each newly emitted assistant/reasoning delta
+from its cumulative text. V8 can keep that entire cumulative backing string
+alive through each small slice stored in the timeline. Detach the two emitted
+strings with `structuredClone`, preserving their exact text and message IDs.
+The real parser/coalescer/store regression retains 600 KiB of output instead
+of approximately 185 MB of obsolete cumulative bodies. No retention limit,
+setting, or timeline behavior changes; only this archive member changes.

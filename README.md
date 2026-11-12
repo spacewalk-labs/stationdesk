@@ -13,12 +13,12 @@ The setup app walks you through preparation, apps, Tailscale sign-in and install
 English is the default; Korean is available. No terminal commands or StationDesk
 account are needed for graphical setup. An internet connection is required.
 
-| Computer | Download v0.1.3 | Requirements |
+| Computer | Download v0.1.4 | Requirements |
 | --- | --- | --- |
-| Mac | [StationDesk-Setup-mac.zip](https://github.com/spacewalk-labs/stationdesk/releases/download/v0.1.3/StationDesk-Setup-mac.zip) | Apple silicon; macOS 14+ for the current [OrbStack](https://orbstack.dev/download) |
-| Ubuntu | [stationdesk-installer_0.1.3_all.deb](https://github.com/spacewalk-labs/stationdesk/releases/download/v0.1.3/stationdesk-installer_0.1.3_all.deb) | Ubuntu 24.04 desktop with a systemd user session |
+| Mac | [StationDesk-Setup-mac.zip](https://github.com/spacewalk-labs/stationdesk/releases/download/v0.1.4/StationDesk-Setup-mac.zip) | Apple silicon; macOS 14+ for the current [OrbStack](https://orbstack.dev/download) |
+| Ubuntu | [stationdesk-installer_0.1.4_all.deb](https://github.com/spacewalk-labs/stationdesk/releases/download/v0.1.4/stationdesk-installer_0.1.4_all.deb) | Ubuntu 24.04 desktop with a systemd user session |
 
-[Release notes and SHA256 checksums](https://github.com/spacewalk-labs/stationdesk/releases/tag/v0.1.3).
+[Release notes and SHA256 checksums](https://github.com/spacewalk-labs/stationdesk/releases/tag/v0.1.4).
 The GitHub **Code → Download ZIP** button downloads source code, not the setup app.
 
 **Mac:** unzip, move **StationDesk Setup.app** to Applications and open it.
@@ -61,7 +61,7 @@ Node 22 runtime under `/opt/stationdesk/runtime/node`. Use `bash install.sh --no
 to skip adding it (this does not remove an existing installation).
 
 `~/.local/bin/stationdesk` links to the engine. Commands:
-`add <id|git-URL[#ref]|folder>`, `remove <id>`, `list [--json]`, `project`, `doctor`, `update`.
+`add <id|git-URL[#ref]|folder>`, `remove <id>`, `list [--json]`, `project`, `doctor`, `update`, `funnel on|off`.
 `update` only accepts fast-forward Git updates; unchanged apps are not restarted.
 `doctor` must report at least one check and zero failures.
 
@@ -88,11 +88,13 @@ See the [app contract and decisions](docs/decisions.md).
 Send a card to the owner from any local agent:
 
 ```sh
-stationdesk-card --group backup --level urgent --title 'Backup needs attention' --peek
+stationdesk-card --group backup --title 'Backup needs review'
 stationdesk-card --group backup --title 'Backup recovered' --resolves
 stationdesk-card --group review --title 'Review changes' --cwd /path/to/repo --prompt 'Review the changes'
 ```
 
+Cards are normal by default. `--level urgent` is for a real service outage or infrastructure damage only,
+because it goes to Slack; decision requests, mentions, hygiene and data freshness stay normal.
 Optional flags include `--body`, `--link`, and `--peek`. Open the inbox from the hub
 or Porthole on any bundled app. A run card starts Claude in a new devterm tmux
 session with its cwd and prompt; sign in to the installed agent CLI first.
@@ -101,8 +103,11 @@ App failures send urgent cards automatically; successful starts resolve them.
 Slack is optional. Put `SLACK_WEBHOOK_URL=...`, or `SLACK_BOT_TOKEN=...` plus
 `SLACK_CHANNEL=...`, in `~/.config/stationdesk/slack.env` (mode 0600).
 Urgent cards wait 300 seconds before sending; `SLACK_GRACE_SECONDS` overrides it.
-Recovery during that delay cancels the notification. Recovery after delivery
-updates a bot message or sends a webhook follow-up. Without the file, nothing is sent.
+An app-unit failure waits until the failure has lasted 15 minutes; a re-failure within
+15 minutes of recovery continues the same episode. Recovery before sending cancels the
+notification, and recovery never posts: it only edits a bot message that was sent.
+Without the file, nothing is sent. Once a week one normal inbox card counts the events
+that never paged (normal cards and urgent ones that recovered first); it is not sent to Slack.
 The local HTTP ingest is `POST /monitor/api/ingest`, with JSON and
 `X-StationDesk-Token` from `state/card-ingest.token`; the owner gate still applies
 at the HTTPS entrance. Local producers normally use the spool CLI instead.

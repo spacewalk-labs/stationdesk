@@ -55,8 +55,22 @@
   No root nginx include reads user-owned files. Existing system nginx is left alone;
   only a newly installed distro nginx is stopped and disabled during bootstrap.
   This replaced the original system-nginx bootstrap.
+- Public internet entrance (Tailscale Funnel) is off until the owner asks for it: the engine opens a
+  `funnel` endpoint only while `state/box.toml` has `funnel = true` (`stationdesk funnel on|off`), and
+  closes an open one when the key is gone. Publish turns it on when the owner publishes externally,
+  and its Settings view has the switch. Reason: installs and updates must not open a public port nobody asked for.
 - Owner comes from Tailscale Self.UserID → User.LoginName, falling back to `state/box.toml` owner.
+  A tagged node's login names the node, not a person, so a tagged node takes its owner from `state/box.toml`.
   Offline smoke injects this header on loopback; real access goes through Tailscale Serve.
+- Reader hook (off by default): `state/box.toml` `[read] domain = "example.org"`, `apps = ["publish"]`
+  lets identities `*@example.org` GET/HEAD through the listed apps' serve ports (and non-funnel
+  endpoints) in addition to the owner. Other methods, other domains and every unlisted app stay
+  owner-only; the hub (443) is never widened. Apply with `stationdesk project`. The engine
+  carries no policy: the box decides the domain and the apps.
+- Endpoint `"open": true` (in the app's endpoints file): tailnet-only `serve` with no owner check, for
+  receivers whose callers are other boxes. The fragment narrows method and path; the app authenticates
+  (dev-monitor: `POST /api/ingest` with the card-ingest token on tailnet 19926). `doctor` has no gate
+  to probe there.
 - `doctor` runs app smoke scripts and owner/other/anonymous gate probes; zero checks fail.
 - `update` fetches the core and each addon clone, merges only fast forward, then refreshes
   every installed app (excluding links), collecting installation failures.
@@ -75,6 +89,10 @@
   or card. A later event reopens the resolved card instead of adding one, unread
   with its alert and run offered again, so a restart loop is one card ×N; a card
   the owner archived stays closed.
+  Another account on the box can publish cards: `sudo apps/dev-monitor/spool-writers.sh <account>`
+  puts it in one group (default `stationdesk-card-writers`) and makes the spool dirs 0710 / `tmp`,`new`
+  setgid+sticky 3770 (`bad` stays box-user only). The collector reads `new/` with O_NOFOLLOW, and
+  `stationdesk-card` writes 0644 files; the directory modes, not the file mode, keep others out.
   Read cards idle for 48 hours archive; data expires after 180 days.
 - Engine app units use `OnFailure=stationdesk-alarm@%n.service`. `ExecStopPost`
   also observes abnormal exits before automatic restarts, and `ExecStartPost`
@@ -85,6 +103,10 @@
   it does not mark the card read. The first visit establishes a watermark.
   Optional `/accounts/status.json` is `{ "status": "normal" | "warning" | "critical" }`:
   warning animates at six seconds per orbit, critical at two; absent means no ring.
+  An installed accounts app's `web/accounts/porthole.json` may name `account_alert`, a
+  `http://127.0.0.1:` URL answering `{ "level": "none" | "warn" | "crit", "reason", ... }` for
+  the account in use; status takes the worse of sign-in state and that grade, so a spent quota
+  lights the ring and the menu says why. Unreadable means no grade.
   Reduced motion disables animation.
 
 ## Port allocation

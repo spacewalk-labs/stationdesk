@@ -9,9 +9,9 @@ is needed. The app never collects your administrator or Tailscale password.
 ## Mac (Apple silicon)
 
 The setup app itself supports macOS 13+, but current OrbStack requires macOS 14+.
-The published v0.1.3 app targets Apple silicon (arm64).
+The published v0.1.4 app targets Apple silicon (arm64).
 
-1. Download [StationDesk-Setup-mac.zip](https://github.com/spacewalk-labs/stationdesk/releases/download/v0.1.3/StationDesk-Setup-mac.zip), unzip it, and move **StationDesk Setup.app** to Applications.
+1. Download [StationDesk-Setup-mac.zip](https://github.com/spacewalk-labs/stationdesk/releases/download/v0.1.4/StationDesk-Setup-mac.zip), unzip it, and move **StationDesk Setup.app** to Applications.
 2. Open it once. The current release is ad hoc signed, not notarized, and distributed outside the Mac App Store. If macOS blocks it, dismiss the alert without deleting the app. Go to **System Settings → Privacy & Security → Open Anyway**, confirm and authenticate on your Mac if requested. Approve only the app from the release above. [Apple's instructions](https://support.apple.com/en-us/102445); wording varies by macOS version.
 3. Choose **Get started**. If OrbStack is missing, use **Download OrbStack**, install it from the [official site](https://orbstack.dev/download), and open it to complete its own setup. OrbStack has separate licensing terms.
 4. Return to setup, choose **Check again**, then **Prepare workspace**. Setup creates or reuses only the Ubuntu 24.04 machine named `stationdesk`. When prepared, choose **Continue**. Other existing VMs are not used.
@@ -20,7 +20,7 @@ No Python installation is required on macOS. StationDesk runs inside the Ubuntu 
 
 ## Ubuntu 24.04 desktop
 
-1. Download [stationdesk-installer_0.1.3_all.deb](https://github.com/spacewalk-labs/stationdesk/releases/download/v0.1.3/stationdesk-installer_0.1.3_all.deb).
+1. Download [stationdesk-installer_0.1.4_all.deb](https://github.com/spacewalk-labs/stationdesk/releases/download/v0.1.4/stationdesk-installer_0.1.4_all.deb).
 2. Open it with your graphical package installer and choose **Install**. If it opens in an archive viewer, right-click and choose your software/package installer. Approve the OS administrator dialog.
 3. Open **StationDesk Setup** from the applications menu. Choose **Get started → Prepare**, approve the OS authentication dialog, and choose **Continue** when ready.
 
@@ -53,7 +53,7 @@ updates. Internet access is required for that checkout and vendor downloads.
 Keep build outputs outside the source checkout:
 
 ```sh
-bash installer/linux/build-deb.sh /absolute/output/stationdesk-installer_0.1.3_all.deb
+bash installer/linux/build-deb.sh /absolute/output/stationdesk-installer_0.1.4_all.deb
 # On a Mac with Apple command line tools:
 bash installer/mac/build.sh /absolute/output
 ```

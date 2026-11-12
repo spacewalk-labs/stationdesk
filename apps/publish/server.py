@@ -46,6 +46,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -55,6 +56,9 @@ from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'lib'))
+from stationdesk_company import Catalog
 
 
 class Share:
@@ -139,7 +143,12 @@ _RE_TRANSACTION = re.compile(
 
 # A plan is a short-lived, single-use capability for an explicit bundle build.
 MAX_BUNDLE_DOCS = 50
-MAX_BUNDLE_TOTAL_BYTES = 60 * 1024 * 1024
+# Same values as the receiver's total and per-file limits, so
+# an oversized publication fails here, before the upload, instead of after it.
+MAX_BUNDLE_TOTAL_BYTES = 320 * 1024 * 1024
+MAX_BUNDLE_MEMBER_BYTES = 256 * 1024 * 1024
+# A page with hundreds of downloads is a file server, not a document.
+MAX_BUNDLE_ATTACHMENTS = 100
 BUNDLE_PLAN_TTL_S = 10 * 60
 MAX_BUNDLE_PLANS = 256
 _BUNDLE_PLANS = {}
@@ -225,10 +234,35 @@ FUNNEL_PORT = os.environ.get('STATIONDESK_PUBLISH_FUNNEL_PORT', '')
 _funnel_cache = (0.0, None)
 
 
+STATIONDESK_ROOT = os.environ.get('STATIONDESK_ROOT', '/opt/stationdesk')
+
+
+def funnel_switch():
+    """The owner's switch for the public entrance: `funnel = true` in box.toml, off by default."""
+    try:
+        with open(os.path.join(STATIONDESK_ROOT, 'state/box.toml'), 'rb') as stream:
+            return tomllib.load(stream).get('funnel') is True
+    except (OSError, ValueError):
+        return False
+
+
+def set_funnel(on):
+    """Flip the switch through the engine, which opens or closes the Funnel itself."""
+    global _funnel_cache
+    try:
+        r = subprocess.run([os.path.join(STATIONDESK_ROOT, 'bin/stationdesk'), 'funnel', 'on' if on else 'off'],
+                           capture_output=True, text=True, timeout=180)
+        ok, message = r.returncode == 0, (r.stderr or r.stdout).strip()[-500:]
+    except (OSError, subprocess.TimeoutExpired) as error:
+        ok, message = False, str(error)
+    _funnel_cache = (0.0, None)
+    return ok, message
+
+
 def funnel_status():
-    """None when this box is not publishing through Tailscale Funnel; otherwise whether
-    Funnel is live on our port. Asked of tailscale itself, so enabling Funnel in the
-    tailnet policy and re-running the install shows up without a restart."""
+    """None when this box is not publishing through Tailscale Funnel; otherwise the owner's
+    switch and whether Funnel is live on our port. Asked of tailscale itself, so enabling
+    Funnel in the tailnet policy and re-running the install shows up without a restart."""
     global _funnel_cache
     if not FUNNEL_PORT:
         return None
@@ -242,13 +276,14 @@ def funnel_status():
         active = any(on and host.endswith(':' + FUNNEL_PORT) for host, on in allowed.items())
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass
-    _funnel_cache = (time.time(), {'port': FUNNEL_PORT, 'active': active,
+    _funnel_cache = (time.time(), {'port': FUNNEL_PORT, 'active': active, 'switch': funnel_switch(),
                                    'admin_url': 'https://login.tailscale.com/admin/acls'})
     return _funnel_cache[1]
 
 
 # ---- site identity: name and favicon, set by the owner in state/publish.env ----
-# The app only reads these. Defaults are the product's own label and icon.
+# The app only reads these. Favicon: the owner's setting, else the company favicon
+# (a box connected to the company catalog), else the product's own icon.
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = os.path.join(os.environ.get('STATIONDESK_ROOT', '/opt/stationdesk'), 'state/publish.env')
 DEFAULT_SITE_NAME = 'Publish'
@@ -275,6 +310,10 @@ def _load_site():
             data, path = candidate.read_bytes(), candidate
         except (OSError, ValueError) as exc:
             error = f'{configured}: {exc}'
+    if not path and (company := Catalog(os.environ.get('STATIONDESK_ROOT', '/opt/stationdesk')).favicon()):
+        candidate = company
+        if candidate.suffix.lower() in _FAVICON_TYPES and candidate.stat().st_size <= FAVICON_MAX_BYTES:
+            data, path = candidate.read_bytes(), candidate
     source = str(path) if path else ''
     if not path:
         path = APP_DIR / 'icon.svg'
@@ -295,7 +334,7 @@ def site_settings():
         destination = 'none'
     else:
         destination = 'local' if PUBLIC_MODE == 'local' else 'remote'
-    return {**SITE, 'config_file': CONFIG_FILE, 'destination': destination,
+    return {**_load_site(), 'config_file': CONFIG_FILE, 'destination': destination,
             'base_url': BASE_URL if PUBLIC_ENABLED else '', 'share_dir': ROOT}
 
 
@@ -324,7 +363,7 @@ def with_site_icon(html_bytes):
     finder.feed(text)
     if finder.found:
         return html_bytes
-    tag = f'<link rel="icon" href="{SITE["favicon"]}">'
+    tag = f'<link rel="icon" href="{_load_site()["favicon"]}">'
     visible = _RE_COMMENT_SPAN.sub(lambda m: ' ' * len(m.group(0)), text)
     for rx in (_RE_HEAD_OPEN, _RE_HTML_OPEN):
         m = rx.search(visible)
@@ -1083,6 +1122,69 @@ def _rewrite_bundle_anchors(html, current, link_map):
     return html, list(dict.fromkeys(warnings)), list(dict.fromkeys(unsupported))
 
 
+def _attachment_target(ref, current):
+    """The share-dir file (not HTML) a local anchor points at, or None."""
+    ref = html_unescape(ref or '')
+    if not ref or ref.startswith('#') or _RE_SCHEME.match(ref) or ref.startswith('//'):
+        return None
+    path = urllib.parse.unquote(urllib.parse.urlsplit(
+        urllib.parse.urljoin('/' + current, ref)).path).lstrip('/')
+    if not path or path.lower().endswith(('.html', '.htm')):
+        return None
+    resolved = safe_resolve(path)
+    return path if resolved and os.path.isfile(resolved) else None
+
+
+def add_attachments(files):
+    """Carry the share-dir files the HTML members link to (MP4, PDF, ZIP...).
+
+    Without this a download link on a published page is a 404: only HTML used to
+    travel. The set is derived from what the published pages actually link, so
+    there is no new list for a caller to inject into. Returns the names added.
+    """
+    added = []
+    limit = LOCAL_MAX_BYTES if PUBLIC_MODE == 'local' else MAX_BUNDLE_TOTAL_BYTES
+    total = sum(len(data) for data in files.values())
+    for member in [m for m in files if m.lower().endswith(('.html', '.htm'))]:
+        html = files[member].decode('utf-8', 'replace')
+        parser = _AnchorParser(html)
+        parser.feed(html)
+        parser.close()
+        replacements = []
+        for anchor in parser.anchors:
+            target = _attachment_target(anchor['ref'], member)
+            if not target:
+                continue
+            if target not in files:
+                if len(added) >= MAX_BUNDLE_ATTACHMENTS:
+                    raise BundleValidationError(
+                        f'attachment limit exceeded: > {MAX_BUNDLE_ATTACHMENTS}')
+                path = safe_resolve(target)
+                # Size before reading: reading a 2 GB file to learn it is too big is too late.
+                size = os.path.getsize(path)
+                if size > MAX_BUNDLE_MEMBER_BYTES:
+                    raise BundleValidationError(
+                        f'attachment {target} exceeds the per-file limit: '
+                        f'{size} > {MAX_BUNDLE_MEMBER_BYTES}')
+                total += size
+                if total > limit:
+                    raise BundleValidationError(f'publication total size exceeds limit: {total} > {limit}')
+                with open(path, 'rb') as fh:
+                    files[target] = fh.read()
+                added.append(target)
+            parsed = urllib.parse.urlsplit(html_unescape(anchor['ref']))
+            suffix = (('?' + parsed.query) if parsed.query else '') + (('#' + parsed.fragment) if parsed.fragment else '')
+            # target is a file name; the href must be a URL path ("LH #1.mp4" -> "LH%20%231.mp4").
+            replacements.append((anchor['start'], anchor['end'], urllib.parse.quote(target) + suffix))
+        for start, end, replacement in reversed(replacements):
+            html = html[:start] + replacement + html[end:]
+        if replacements:
+            files[member] = html.encode('utf-8')
+    if total > limit:
+        raise BundleValidationError(f'publication total size exceeds limit: {total} > {limit}')
+    return added
+
+
 def _register_bundle_plan(owner, entry, candidates):
     now = time.time()
     with _BUNDLE_PLANS_LOCK:
@@ -1294,6 +1396,12 @@ def _ingest_error(res):
         code, msg = err.get('code', ''), err.get('message', '')
         return f'{msg} [{code}]' if code and msg else (msg or code or 'ingest error')
     return err if isinstance(err, str) else 'ingest error'
+
+
+# The snapshot push carries the whole bundle (up to MAX_BUNDLE_TOTAL_BYTES, base64 in JSON).
+# Over a relayed tailnet path 20 s was not enough for a 39 MB page and every publish failed
+# with "timed out" (2026-11-05). Metadata calls keep their short timeouts.
+INGEST_PUSH_TIMEOUT_S = 300
 
 
 def _ingest(method, ep, body=None, timeout=20):
@@ -1987,6 +2095,11 @@ def _local_set_expiry(slug, owner, ttl_hours):
 def publish_public(name, ttl_hours, owner, mode='open', password='', docs=None, plan_id=''):
     if not PUBLIC_ENABLED:
         return False, 'external publish not configured (state/publish.env)'
+    if FUNNEL_PORT and not funnel_switch():
+        # Publishing externally is the owner asking for the public entrance; it is off until then.
+        ok, message = set_funnel(True)
+        if not ok:
+            return False, f'could not turn on the public entrance (stationdesk funnel on): {message}'
     if PUBLIC_MODE == 'local' and not owner:
         return False, 'identity header missing — refusing to publish without an owner'
     if mode not in ('open', 'gated'):
@@ -2046,6 +2159,10 @@ def publish_public(name, ttl_hours, owner, mode='open', password='', docs=None, 
             files = {'index.html': html_bytes}
         except Exception as e:
             return False, f'bundle failed: {e}'
+    try:
+        attachments = add_attachments(files)
+    except Exception as e:
+        return False, f'attachments failed: {e}'
     files = {member: with_site_icon(data) if member.lower().endswith(('.html', '.htm')) else data
              for member, data in files.items()}
     if html_bytes is not None:
@@ -2099,7 +2216,7 @@ def publish_public(name, ttl_hours, owner, mode='open', password='', docs=None, 
                 # v1 carries every document in one files map, entry named index.html.
                 payload['files'] = {member: base64.b64encode(data).decode('ascii')
                                     for member, data in files.items()}
-            elif docs:
+            elif len(files) > 1:
                 payload['files'] = {member: base64.b64encode(data).decode('ascii') for member, data in files.items()}
             else:
                 payload['html_b64'] = base64.b64encode(html_bytes).decode('ascii')
@@ -2111,7 +2228,7 @@ def publish_public(name, ttl_hours, owner, mode='open', password='', docs=None, 
                 payload['mode'] = mode
             if mode == 'gated':
                 payload.update({'mode': 'gated', 'gate': {'type': 'password', 'password': password}})
-            res = _ingest('POST', '/ingest', payload)
+            res = _ingest('POST', '/ingest', payload, timeout=INGEST_PUSH_TIMEOUT_S)
         except Exception as e:
             return False, f'ingest failed: {e}'
     if not isinstance(res, dict):
@@ -2125,7 +2242,8 @@ def publish_public(name, ttl_hours, owner, mode='open', password='', docs=None, 
     prefix = '/g' if mode == 'gated' and PUBLIC_MODE == 'local' else ''
     return True, {'url': f'{BASE_URL}{prefix}/{slug}/', 'slug': slug, 'expiry': r.get('expiry'),
                   'ttl_hours': r.get('ttl_hours'), 'mode': mode,
-                  'bundle': sorted(files) if docs else None, 'warnings': warnings}
+                  'bundle': sorted(files) if docs else None, 'attachments': attachments,
+                  'warnings': warnings}
 
 
 def _local_guard(owner):
@@ -2424,6 +2542,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('Expected JSON object')
         except (ValueError, TypeError) as error:
             return self._json(400, {'ok': False, 'error': str(error)})
+        if path in ('/api/funnel', '/funnel'):
+            if not FUNNEL_PORT:
+                return self._json(400, {'ok': False, 'error': 'this box does not publish through Tailscale Funnel'})
+            ok, message = set_funnel(bool(body.get('on')))
+            return self._json(200 if ok else 500, {'ok': ok, 'error': '' if ok else message,
+                                                   'funnel': funnel_status()})
         if path in ('/api/publish', '/publish'):
             try:
                 Share(ROOT).publish(body['source'], body['name'], body.get('mode', 'symlink'))

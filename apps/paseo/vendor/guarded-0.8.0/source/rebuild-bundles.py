@@ -4,6 +4,7 @@
 import gzip
 import hashlib
 import io
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ import tarfile
 import tempfile
 import urllib.request
 
+os.umask(0o002)  # Match the published overlay modes regardless of the invoking shell.
 here = Path(__file__).resolve().parent
 build = Path(sys.argv[1]).resolve()
 out = Path(sys.argv[2]).resolve()
@@ -35,6 +37,26 @@ with tempfile.TemporaryDirectory(prefix='paseo-rebuild-', dir=out) as directory:
         target = stage / name / 'package' / member
         shutil.copyfile(build / 'packages' / name / member, target)
     subprocess.run(['git', 'apply', '--no-index', str(here / 'distribution.patch')], cwd=stage, check=True)
+    patches = here.parents[2] / 'patches'
+    server = stage / 'server/package/dist/server/server'
+    recovery_targets = [server / 'agent/agent-storage.js', server / 'agent/agent-manager.js',
+                        server / 'bootstrap.js', server / 'agent/lifecycle-command.js']
+    subprocess.run(['node', str(patches / 'crash-recovery.mjs'), *map(str, recovery_targets)], check=True)
+    for target in recovery_targets:
+        candidate = Path(str(target) + '.paseo-new.mjs')
+        subprocess.run(['node', '--check', str(candidate)], check=True)
+        candidate.replace(target)
+    shutil.copyfile(patches / 'crash-recovery.js', server / 'agent/crash-recovery.js')
+    target = server / 'agent/providers/codex-app-server-agent.js'
+    subprocess.run(['node', str(patches / 'codex-subagent-activity.mjs'), str(target)], check=True)
+    candidate = Path(str(target) + '.paseo-new.mjs')
+    subprocess.run(['node', '--check', str(candidate)], check=True)
+    candidate.replace(target)
+    target = server / 'agent/providers/claude/agent.js'
+    subprocess.run(['node', str(patches / 'claude-stream-retention.mjs'), str(target)], check=True)
+    candidate = Path(str(target) + '.paseo-new.mjs')
+    subprocess.run(['node', '--check', str(candidate)], check=True)
+    candidate.replace(target)
     for name in ['client', 'protocol', 'server']:
         package = stage / name / 'package'
         shutil.copyfile(here.parent / 'UPSTREAM-LICENSE', package / 'LICENSE-Paseo-Apache-2.0')

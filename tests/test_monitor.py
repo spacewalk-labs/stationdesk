@@ -201,6 +201,29 @@ class HandlerTests(unittest.TestCase):
             self.assertEqual((202, {'unit': 'test'}), self.request())
             start.assert_called_once_with('add', 'hello')
 
+    def test_ingest_needs_only_the_token_from_either_sender_header(self):
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {'STATIONDESK_ROOT': root}):
+            token = handler.ingest_token(root)
+            card = json.dumps({'id': 'a1', 'group': 'g', 'title': 't', 'source': 's', 'level': 'normal'}).encode()
+            def post(header, value, owner='stranger@other.test'):
+                request = object.__new__(handler.Handler)
+                request.path = '/api/ingest'
+                request.headers = Message()
+                for name, val in [('Host', 'x'), ('Tailscale-User-Login', owner), ('Content-Type', 'application/json'),
+                                  ('Content-Length', str(len(card))), (header, value)]:
+                    if val is not None:
+                        request.headers[name] = val
+                request.rfile = io.BytesIO(card)
+                replies = []
+                request.reply = lambda *args: replies.append(args)
+                request.do_POST()
+                return replies[0][0]
+            self.assertEqual(401, post('X-Devmon-Ingest-Token', 'wrong'))
+            self.assertEqual(401, post('X-StationDesk-Token', 'wrong'))
+            self.assertEqual(401, post('X-Unrelated', 'x'))
+            self.assertEqual(202, post('X-Devmon-Ingest-Token', token))
+            self.assertEqual(202, post('X-StationDesk-Token', token))
+
     def test_tls_termination_uses_public_fqdn_origin(self):
         with patch.dict(os.environ, {'STATIONDESK_FQDN': 'desk.tail.test'}), patch.object(handler.Store, 'start', return_value={'unit': 'test'}) as start:
             self.assertEqual(403, self.request(origin='http://desk.test')[0])

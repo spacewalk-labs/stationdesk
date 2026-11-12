@@ -85,6 +85,26 @@ class GateTests(unittest.TestCase):
         self.assertEqual('keep', outside.read_text())
         self.assertFalse((devterm.SECRETS / 'linked.txt').is_symlink())
 
+    def test_orca_sidebar_uses_the_orca_cli_and_flags_the_client(self):
+        cli = self.root / 'orca-ide'
+        cli.write_text('#!/bin/sh\ncase "$1" in\n'
+                       'repo) echo \'{"ok":true,"result":{"repos":[{"id":"r1","displayName":"proj","path":"/p"}]}}\';;\n'
+                       'worktree) echo \'{"ok":true,"result":{"worktrees":[{"id":"w1","repoId":"r1","path":"/p","branch":"refs/heads/main","isMainWorktree":true}]}}\';;\n'
+                       'status) echo \'{"ok":true,"result":{"runtime":{"reachable":true}}}\';;\nesac\n')
+        cli.chmod(0o755)
+        terminal = devterm.terminal
+        with patch.object(terminal, 'ORCA_CLI', str(self.root / 'absent')):
+            self.assertFalse(terminal.orca_installed())
+            code, status = self.request('/orca/status', method='GET')
+            self.assertEqual((200, False), (code, json.loads(status)['ready']))
+        with patch.object(terminal, 'ORCA_CLI', str(cli)):
+            self.assertTrue(terminal.orca_installed())
+            self.assertTrue(json.loads(self.request('/orca/status', method='GET')[1])['ready'])
+            tree = json.loads(self.request('/orca/tree', method='GET')[1])
+            self.assertEqual(('proj', 'main', True), (tree['repos'][0]['name'], tree['repos'][0]['worktrees'][0]['branch'],
+                                                       tree['repos'][0]['worktrees'][0]['isMain']))
+            self.assertEqual(400, self.request('/orca/worktree-create', {'repoId': 'r1'})[0])
+
     def test_local_session_names_survive_create_and_delete(self):
         for name in ('my project', '한글 작업', '-leading'):
             with patch.object(devterm, 'tmux', return_value=SimpleNamespace(returncode=0)) as run:

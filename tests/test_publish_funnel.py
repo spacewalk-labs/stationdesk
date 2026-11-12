@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -21,8 +22,10 @@ spec.loader.exec_module(publish)
 class FunnelEngineTests(unittest.TestCase):
     setUp, command, fixture = Base.setUp, Base.command, Base.fixture
 
-    def endpoint_app(self):
+    def endpoint_app(self, funnel=True):
         self.fixture('publish', 'endpoints = "publish/funnel-endpoints.json"\n')
+        if funnel:
+            self.engine.set_box('funnel', True)
         state = self.root / 'state/publish'
         state.mkdir()
         (state / 'funnel.conf').write_text('location / { root ${STATIONDESK_STATE}/publish/public; }\n')
@@ -58,6 +61,64 @@ class FunnelEngineTests(unittest.TestCase):
             self.engine.remove('publish')
             self.assertIn(['tailscale', 'funnel', '--https=10000', 'off'], self.commands())
             self.assertNotIn(['tailscale', 'serve', '--https=10000', 'off'], self.commands())
+
+    def test_funnel_stays_closed_until_the_owner_turns_it_on_and_off_closes_it(self):
+        self.endpoint_app(funnel=False)
+        live = {'AllowFunnel': {}}
+        refuse = []
+
+        def command(args, **kwargs):
+            if args[:3] == ['tailscale', 'funnel', 'status']:
+                return subprocess.CompletedProcess(args, 0, json.dumps(live), '')
+            if args == ['tailscale', 'funnel', '--https=10000', 'off'] and not refuse:
+                live['AllowFunnel'] = {}
+            if args == opened and not refuse:
+                live['AllowFunnel'] = {'desk.example.test:10000': True}
+            return self.command(args, **kwargs)
+        opened = ['tailscale', 'funnel', '--bg', '--https=10000', 'http://127.0.0.1:19926']
+        closed = ['tailscale', 'funnel', '--https=10000', 'off']
+        with patch.object(engine.shutil, 'which', return_value='/usr/bin/tailscale'), self.run_add(command):
+            self.engine.add('publish')
+            self.assertNotIn(opened, self.commands())
+            self.assertNotIn(closed, self.commands())  # nothing open, nothing to close
+            self.engine.link_add('Docs', 'https://example.com/docs')  # a link tile has no app.toml
+            self.fixture('hello')
+            self.engine.add('hello')
+            shutil.rmtree(self.root / 'apps/hello')  # a vanished source must not fail the switch
+            self.calls.clear()
+            self.engine.funnel(True)
+            self.assertIn('funnel = true', (self.root / 'state/box.toml').read_text())
+            self.assertIn(opened, self.commands())
+            self.calls.clear()
+            self.engine.funnel(False)
+            self.assertNotIn('funnel', (self.root / 'state/box.toml').read_text())
+            self.assertIn(closed, self.commands())
+            self.assertIn('owner = "owner@example.test"', (self.root / 'state/box.toml').read_text())
+            # tailscale still reports it open after the close (sudo refused): off must fail loudly.
+            live['AllowFunnel'] = {'desk.example.test:10000': True}
+            refuse.append(True)
+            self.calls.clear()
+            with self.assertRaisesRegex(RuntimeError, 'still open'), contextlib.redirect_stderr(io.StringIO()):
+                self.engine.funnel(False)
+            # Opening that tailscale refuses fails too, and leaves the switch off so a publish retries.
+            live['AllowFunnel'] = {}
+            with self.assertRaisesRegex(RuntimeError, 'did not open'), contextlib.redirect_stderr(io.StringIO()):
+                self.engine.funnel(True)
+            self.assertNotIn('funnel', (self.root / 'state/box.toml').read_text())
+
+    def test_funnel_off_retries_under_sudo_when_path_handler_blocks_operator(self):
+        refusal = "401 Unauthorized: must be root, or be an operator and able to run 'sudo tailscale' to serve a path"
+        calls = []
+
+        def command(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ['tailscale', 'funnel']:
+                return subprocess.CompletedProcess(args, 1, '', refusal)
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(engine, 'run', side_effect=command), contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.engine.unexpose(dict(https_port=10000, gate_port=19926, funnel=True))
+        self.assertIn(['sudo', '-n', 'tailscale', 'funnel', '--https=10000', 'off'], calls)
+        self.assertEqual('', errors.getvalue())
 
     def test_policy_blocked_funnel_skips_the_cli_and_install_succeeds(self):
         self.endpoint_app()
@@ -113,6 +174,29 @@ class FunnelEngineTests(unittest.TestCase):
             site = (self.root / 'nginx/site.conf').read_text()
             self.assertIn('listen 127.0.0.1:19926;\n    if ($http_tailscale_user_login', site)
             self.assertIn(['tailscale', 'serve', '--bg', '--https=8448', 'http://127.0.0.1:19926'], self.commands())
+
+    def test_open_endpoint_is_tailnet_serve_without_owner_gate_and_may_share_a_number_with_a_gate(self):
+        # dev-monitor takes tailnet https 19926 (the Airlock ingest port) while publish's funnel
+        # gate listens on loopback 19926: different namespaces, so both install.
+        self.endpoint_app()
+        self.fixture('dev-monitor', 'endpoints = "dev-monitor/endpoints.json"\n')
+        state = self.root / 'state/dev-monitor'
+        state.mkdir()
+        (state / 'ingest.conf').write_text('location = /api/ingest { proxy_pass http://127.0.0.1:${STATIONDESK_PORT}; }\n')
+        (state / 'endpoints.json').write_text(json.dumps([dict(https_port=19926, gate_port=19933,
+                                                               fragment='dev-monitor/ingest.conf', open=True)]))
+        with patch.object(engine.shutil, 'which', return_value='/usr/bin/tailscale'), self.run_add():
+            self.engine.add('publish')
+            self.engine.add('dev-monitor')
+            site = (self.root / 'nginx/site.conf').read_text()
+            self.assertIn('listen 127.0.0.1:19933;\n    include', site)
+            self.assertIn(['tailscale', 'serve', '--bg', '--https=19926', 'http://127.0.0.1:19933'], self.commands())
+            self.assertNotIn(['tailscale', 'funnel', '--bg', '--https=19926', 'http://127.0.0.1:19933'], self.commands())
+        with patch.object(self.engine, 'tailscale_status', return_value={}), \
+                patch.object(self.engine, 'identity', return_value=('owner@example.test', '')):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.engine.doctor()
+        self.assertNotIn('dev-monitor endpoint-19926', output.getvalue())
 
     def test_missing_endpoints_file_means_none(self):
         self.fixture('publish', 'endpoints = "publish/funnel-endpoints.json"\n')
@@ -216,6 +300,36 @@ class SurfaceTests(unittest.TestCase):
         with patch.object(publish, 'FUNNEL_PORT', ''):
             self.assertIsNone(publish.funnel_status())
 
+
+    def test_switch_is_read_from_box_toml_and_flipped_through_the_engine(self):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / 'state').mkdir()
+            box = Path(root) / 'state/box.toml'
+            with patch.object(publish, 'STATIONDESK_ROOT', root):
+                self.assertFalse(publish.funnel_switch())  # no file: off
+                box.write_text('owner = "o@example.test"\nfunnel = true\n')
+                self.assertTrue(publish.funnel_switch())
+                box.write_text('funnel = "yes"\n')
+                self.assertFalse(publish.funnel_switch())  # only a real true turns it on
+                done = subprocess.CompletedProcess([], 0, '', '')
+                with patch.object(publish.subprocess, 'run', return_value=done) as run:
+                    self.assertEqual((True, ''), publish.set_funnel(False))
+                self.assertEqual([f'{root}/bin/stationdesk', 'funnel', 'off'], run.call_args.args[0])
+
+    def test_publishing_externally_turns_the_entrance_on_first(self):
+        calls = []
+        with patch.object(publish, 'PUBLIC_ENABLED', True), patch.object(publish, 'FUNNEL_PORT', '10000'), \
+                patch.object(publish, 'funnel_switch', return_value=False), \
+                patch.object(publish, 'set_funnel', side_effect=lambda on: calls.append(on) or (False, 'no')):
+            ok, message = publish.publish_public('page.html', 24, 'o@example.test')
+        self.assertEqual([True], calls)
+        self.assertFalse(ok)
+        self.assertIn('stationdesk funnel on', message)
+        with patch.object(publish, 'PUBLIC_ENABLED', True), patch.object(publish, 'FUNNEL_PORT', '10000'), \
+                patch.object(publish, 'funnel_switch', return_value=True), \
+                patch.object(publish, 'set_funnel') as flip:
+            publish.publish_public('missing.html', 24, 'o@example.test')
+        flip.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

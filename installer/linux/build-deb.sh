@@ -3,7 +3,7 @@ set -euo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 product=$(cd "$here/../.." && pwd)
 out=${1:?Usage: build-deb.sh /absolute/output.deb [version]}
-version=${2:-0.1.3}
+version=${2:-0.1.4}
 [[ "$out" = /* ]] || { echo 'Output must be an absolute path.' >&2; exit 2; }
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT

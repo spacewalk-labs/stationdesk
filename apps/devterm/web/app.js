@@ -12,12 +12,13 @@
  * Site facts (ports, hub origin, feature flags) come from window.__DEVTERM, templated
  * in by the installer. Nothing is hardcoded. Optional features degrade cleanly:
  *   fileview  — click a file path in the terminal to open it in fileview
+ *   orca      — the Orca worktree sidebar layout
  */
 'use strict';
 
 // Runtime config + feature flags (see index.html). Absent keys => feature off.
 const DT = window.__DEVTERM || {};
-const FEAT = { fileview: !!DT.fileview };
+const FEAT = { fileview: !!DT.fileview, orca: !!DT.orca };
 
 (async function main() {
 
@@ -953,28 +954,21 @@ function openTmuxMenu(anchor) {
   placePop(pop, r.left, r.bottom + 6);
 }
 
-// ---- secret drop (value -> a file on this box -> the terminal gets only a path token) ----
-// StationDesk's devterm gate owns secret-put/list/del. The restored modal sends
-// only path tokens to the terminal; a remote session reads this box over SSH.
+// ---- secret drop (value -> a file on this box -> the clipboard gets only a path token) ----
 const secretUI = (window.initSecretDrop || function () {
   return { openSecretDrop: function () { flash('Secret drop unavailable — secretdrop.js not loaded', 3000, 'error'); } };
 })({
   flash: flash, postJson: postJson,
-  sendInput: sendInput,
   refocus: function () { uiRefocus(); },
   // A remote (*) session's agent runs on another host, so the token has to say how to
   // read this box's file — the same rule the upload token already follows.
   tokenTarget: function (path) {
     return parseRemote(currentSession()) ? ('ssh ' + uploadHost() + ' cat ' + path) : path;
   },
-  readCmd: function (path) {
-    return parseRemote(currentSession()) ? ('ssh ' + uploadHost() + ' cat ' + path) : ('cat ' + path);
-  },
 });
 if (!window.initSecretDrop) console.warn('[devterm] secretdrop.js not loaded — secret drop disabled (the terminal is unaffected)');
 function openSecretDrop() { secretUI.openSecretDrop(); }
 document.getElementById('secret-open').onclick = openSecretDrop;
-if (new URLSearchParams(location.search).get('secret') === '1') openSecretDrop();   // declaration: hoisted for the menu above
 
 // activate (capability + pref) — build/show bar + rebuild top controls. Re-run on matchMedia change.
 function applyMobileKeys() {
@@ -989,6 +983,7 @@ function applyMobileKeys() {
 // ---- WS / ttyd protocol ----
 let ws = null, connected = false, connecting = false, reconnectTimer = null, token = '', reconnectAttempts = 0;
 let switching = false;   // reconnecting due to a session switch (suppresses the connect toast)
+let pendingAgentCmd = null;   // agent launcher: {sn, cmd} to run after that new session connects (consumed once in onopen)
 let _openingSn = null, _openingT = null;   // 'opening session' state — held until real output (onMsg) for instant feedback
 let _dimT = null;
 // avoid the old screen looking frozen during the switch/reconnect gap — dim+spinner over #term (cleared on first output or after 6s).
@@ -1050,6 +1045,10 @@ async function connect() {
     if (!_openingSn) hideStatus();   // hold 'opening' until real output -> no blank screen during agent boot
     try { ws.send(enc(JSON.stringify({ AuthToken: token, columns: term.cols, rows: term.rows }))); } catch (e) {}
     mkFocus();
+    if (pendingAgentCmd) {   // new agent session — run the CLI once the shell prompt is up (once, only in its own session)
+      const c = pendingAgentCmd; pendingAgentCmd = null;
+      if (c.sn === currentSession()) setTimeout(() => { if (connected && c.sn === currentSession()) sendInput(c.cmd + '\r'); }, 350);
+    }
   };
   ws.onmessage = onMsg;
   ws.onclose = () => { switching = false; connecting = false; connected = false; scheduleReconnect(); };
@@ -1072,9 +1071,15 @@ term.onData(sendInput);
 const namesEl = document.getElementById('tabnames');   // left: session tabs + … + new + refresh
 const ctrlsEl = document.getElementById('tabctrls');   // right: copy / A- / A+ / clip
 const MAX_VISIBLE_TABS = 9;
+const sidebarEl = document.getElementById('sidebar');   // experimental layout: left shell-session list
 const DEFAULT_AGENTS = [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }];
+// agent label -> tmux session name (slug). Same rule as devterm-shell ([^A-Za-z0-9_-]->_) so the front slug == the real name.
+function agentSlug(label) { const s = String(label || '').replace(/[^A-Za-z0-9_-]/g, '_'); return s || 'agent'; }
 function isCompact() { return matchMedia('(max-width:820px),(max-height:520px)').matches; }
 function mkTopBar() { return IS_IPAD || !isCompact(); }   // top bar = all iPads (incl. mini) + desktop. Phone only = bottom
+// The experimental sidebar (Orca worktree tree) is only for wide screens + Orca running.
+function effectiveLayout() { return document.getElementById('app').classList.contains('sidebar-on') ? 'sidebar' : 'tabs'; }
+
 // tab prefs persistence (order / hidden / color / theme) — localStorage cache + server (tabs.json) source of truth.
 let tabPrefs = (() => { try { return JSON.parse(localStorage.getItem(TABS_KEY)) || {}; } catch (e) { return {}; } })();
 // normalize types — a corrupt/old localStorage must not break boot in mergedOrder's .filter (same guard as the server load path).
@@ -1082,7 +1087,7 @@ tabPrefs.order = Array.isArray(tabPrefs.order) ? tabPrefs.order : [];
 tabPrefs.hidden = Array.isArray(tabPrefs.hidden) ? tabPrefs.hidden : [];
 tabPrefs.colors = (tabPrefs.colors && typeof tabPrefs.colors === 'object') ? tabPrefs.colors : {};
 tabPrefs.theme = THEMES[tabPrefs.theme] ? tabPrefs.theme : DEFAULT_THEME;
-tabPrefs.layout = 'tabs';
+tabPrefs.layout = tabPrefs.layout === 'sidebar' ? 'sidebar' : 'tabs';                        // experimental layout (default tabs)
 tabPrefs.agents = Array.isArray(tabPrefs.agents) ? tabPrefs.agents : DEFAULT_AGENTS.slice();  // top agent-launcher list
 // localStorage = instant cache / server (~/.config/stationdesk/devterm/tabs.json) = unified source of truth
 let _prefsSaveTimer = null;
@@ -1101,7 +1106,7 @@ function saveTabPrefs(immediate) {
     if (Array.isArray(sp.order)) tabPrefs.order = sp.order;
     if (Array.isArray(sp.hidden)) tabPrefs.hidden = sp.hidden;
     if (sp.colors && typeof sp.colors === 'object') tabPrefs.colors = sp.colors;
-    tabPrefs.layout = 'tabs';
+    if (sp.layout === 'sidebar' || sp.layout === 'tabs') tabPrefs.layout = sp.layout;   // server = source of truth (cross-device)
     if (Array.isArray(sp.agents)) tabPrefs.agents = sp.agents;
     if (THEMES[sp.theme] && sp.theme !== tabPrefs.theme) {   // server theme = source of truth -> apply (reflects changes from other devices)
       tabPrefs.theme = sp.theme;
@@ -1123,6 +1128,7 @@ function switchSession() {
   // no reset: leave the previous frame, and let tmux re-attach's full redraw (erase-to-EOL each row) overwrite it -> no dark flash / buffer-switch bounce.
   switching = true;   // suppress the 'Connecting…' toast for this reconnect
   showTermDim();      // cover the frozen old screen during the switch/reconnect gap (cleared on first output)
+  if (orcaTree) { const _wp = currentWtPath(); if (_wp) selectedWtPath = _wp; }   // keep the sidebar selection following the current session's worktree
   clearMobileMods('switch');
   if (ws) { try { ws.onclose = null; ws.onmessage = null; ws.close(); } catch (e) {} }
   ws = null; connected = false; connecting = false;
@@ -1630,7 +1636,8 @@ function mkTab(name) {
     if (!dragName || dragName === name) return;
     e.preventDefault();
     const rect = b.getBoundingClientRect();
-    const after = (e.clientX - rect.left) > rect.width / 2;   // right half = insert after
+    const vert = !!(b.closest && b.closest('#sidebar'));       // sidebar (vertical list) judges before/after by Y
+    const after = vert ? (e.clientY - rect.top) > rect.height / 2 : (e.clientX - rect.left) > rect.width / 2;   // right/bottom half = insert after
     b.classList.toggle('drop-after', after);
     b.classList.toggle('drop-before', !after);
   });
@@ -1836,7 +1843,26 @@ function openFolderPicker(startPath, onPick) {
 }
 
 let visibleTabs = [];   // tabs currently shown (left->right) — read by Ctrl/Cmd+1~9
+let liveSessionNames = new Set();   // live tmux session names (agent 'running' / re-enter detection)
+let liveSessions = [];              // most recent /sessions raw (for 'other sessions' grouping)
+let orcaTree = null;                // /orca/tree cache: {ok, repos:[{id,name,path,worktrees:[...]}]}
+let orcaReady = false;              // Orca runtime reachable (gates the sidebar worktree mode)
+let selectedWtPath = null;          // selected worktree path — the top agent bar binds to it
+let _wtSig = '', _abSig = '';        // sidebar / agent-bar render signatures — skip DOM rebuild when unchanged
+let pendingSessions = new Map();     // sn -> expiry(ms): optimistic display — shown on the left immediately, cleared when /sessions confirms or on expiry
+// layout dispatcher: sidebar = Orca worktree tree + the selected worktree's agents / tabs = top session tabs (default).
 function renderTabs(list) {
+  const names = list.map((s) => s.name);
+  liveSessionNames = new Set(names);
+  if (pendingSessions.size) {
+    const now = Date.now();
+    for (const [sn, exp] of pendingSessions) {
+      if (names.includes(sn) || now > exp) pendingSessions.delete(sn);   // confirmed or expired -> drop optimistic
+      else liveSessionNames.add(sn);                                     // unconfirmed -> keep optimistic (show left immediately)
+    }
+  }
+  liveSessions = list;
+  if (effectiveLayout() === 'sidebar') { renderWorktreeSidebar(); renderAgentBar(); return; }
   renderTopTabs(list);
 }
 function renderTopTabs(list) {
@@ -1860,8 +1886,288 @@ function renderTopTabs(list) {
   namesEl.appendChild(mkIconBtn(ICONS.refresh, 'Refresh list', loadSessions));
 }
 
-// Refresh tabs and terminal geometry after settings or viewport changes.
-function applyLayout() {
+// ---- experimental layout: Orca worktree tree (left) + the selected worktree's launcher (top) ----
+// worktree = Orca's real worktree (gate /orca/tree, same source as the Orca app). Launcher (shell/agent) = a tmux session in that worktree cwd.
+// The session name is derived deterministically from the worktree PATH (basename) -> stable grouping + deterministic re-enter.
+function wtBaseName(p) { return String(p || '').replace(/\/+$/, '').split('/').pop() || 'wt'; }
+// The path hash keeps two projects/worktrees with the same names (/a/api, /b/api) in separate tmux sessions.
+function pathTag(p) { let h = 5381; for (const c of String(p || '')) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36).slice(0, 6); }
+function wtKey(repoName, wtPath) { return agentSlug(repoName) + '__' + agentSlug(wtBaseName(wtPath)) + '__' + pathTag(wtPath); }
+// launchers to open in a worktree: shell (always) + configured agents. Each has a deterministic session name (sn).
+function launchersFor(repoName, wtPath) {
+  const base = wtKey(repoName, wtPath);
+  const list = [{ label: 'Terminal', cmd: '', sn: 'sh__' + base }];
+  for (const a of tabPrefs.agents) list.push({ label: a.label, cmd: a.cmd, sn: agentSlug(a.label) + (agentSlug(a.label) === a.label ? '' : '-' + pathTag(a.label)) + '__' + base });
+  return list;
+}
+function findWt(path) {
+  const repos = (orcaTree && orcaTree.repos) || [];
+  for (const r of repos) for (const w of r.worktrees) if (w.path === path) return Object.assign({}, w, { repoName: r.name, repoId: r.id });
+  return null;
+}
+// the worktree path the current session belongs to (if its name matches one of that worktree's launchers). Else null.
+function currentWtPath() {
+  const cur = currentSession();
+  for (const r of ((orcaTree && orcaTree.repos) || [])) for (const w of r.worktrees) {
+    if (launchersFor(r.name, w.path).some((L) => L.sn === cur)) return w.path;
+  }
+  return null;
+}
+// ?arg=<session>&arg=<worktree dir> — devterm-shell creates a new session in that dir (existing -> attach, dir ignored).
+function switchToDir(name, dir) {
+  if (!name) return;
+  history.replaceState(null, '', location.pathname + '?arg=' + encodeURIComponent(name) + (dir ? '&arg=' + encodeURIComponent(dir) : ''));
+  switchSession();
+}
+async function refreshOrca() {
+  if (!FEAT.orca) { orcaReady = false; return; }
+  try { orcaReady = !!(await fetch('orca/status', { cache: 'no-store' }).then((r) => r.json())).ready; }
+  catch (e) { orcaReady = false; }
+  if (orcaReady) {
+    try { orcaTree = await fetch('orca/tree', { cache: 'no-store' }).then((r) => r.json()); }
+    catch (e) { orcaTree = null; }
+    if (!orcaTree || !orcaTree.ok) orcaReady = false;
+  }
+}
+// shared popup menu — items: [{hd}|{label,fn,cls}]. Reuses .tab-pop styling.
+function simplePop(x, y, items) {
+  closeTabPops();
+  const pop = document.createElement('div'); pop.className = 'tab-pop';
+  for (const it of items) {
+    if (it.hd) { const h = document.createElement('div'); h.className = 'hd'; h.textContent = it.hd; pop.appendChild(h); continue; }
+    const b = document.createElement('button'); b.textContent = it.label; if (it.cls) b.className = it.cls;
+    b.onclick = () => { closeTabPops(); it.fn(); }; pop.appendChild(b);
+  }
+  placePop(pop, x, y);
+}
+const WT_STATUS_COLOR = { 'in-progress': '#e2c37b', 'in-review': '#6aa0e0', 'completed': '#7fd6a0', 'todo': '#6b7280' };
+// left tree: project -> worktree (status dot) -> its live launcher sessions (shell/agent, right-click=kill). + 'Other sessions'.
+function renderWorktreeSidebar() {
+  const repos = (orcaTree && orcaTree.repos) || [];
+  if (!selectedWtPath) selectedWtPath = currentWtPath() || (repos[0] && repos[0].worktrees[0] && repos[0].worktrees[0].path) || null;
+  const cur = currentSession();
+  const sig = selectedWtPath + '|' + cur + '|' + tabPrefs.agents.map((a) => a.label).join(',') + '|'
+    + repos.map((r) => r.id + ':' + r.worktrees.map((w) => w.path + '~' + w.displayName + '~' + w.status + '~' + w.isMain).join(';')).join('||')
+    + '|' + [...liveSessionNames].sort().join(',') + '|' + [...pendingSessions.keys()].sort().join(',');
+  if (sig === _wtSig) return;   // unchanged -> skip DOM rebuild (no re-poll flicker)
+  _wtSig = sig;
+  const matched = new Set();
+  const navSns = [];
+  sidebarEl.textContent = '';
+  // top 'Projects' header + add project (choose folder -> orca repo add). Always shown (add works with zero repos).
+  const phd = document.createElement('div'); phd.className = 'side-repo side-projects';
+  const pn = document.createElement('span'); pn.className = 'side-repo-name'; pn.textContent = 'Projects'; phd.appendChild(pn);
+  const padd = mkIconBtn(ICONS.plus, 'Add project (choose folder -> register in Orca)', openAddProject);
+  padd.classList.add('side-repo-add'); phd.appendChild(padd);
+  sidebarEl.appendChild(phd);
+  if (!repos.length) {
+    const empty = document.createElement('div'); empty.className = 'side-hd';
+    empty.textContent = 'No projects — use + to add a folder'; empty.style.color = '#7b8296';
+    sidebarEl.appendChild(empty);
+  }
+  for (const repo of repos) {
+    const rh = document.createElement('div'); rh.className = 'side-repo';
+    const ric = document.createElement('span'); ric.className = 'side-repo-icon'; ric.innerHTML = ICONS.folder; rh.appendChild(ric);
+    const rn = document.createElement('span'); rn.className = 'side-repo-name'; rn.textContent = repo.name; rh.appendChild(rn);
+    const add = mkIconBtn(ICONS.plus, 'New worktree (' + repo.name + ')', () => openWorktreeCreate(repo));
+    add.classList.add('side-repo-add'); rh.appendChild(add);
+    sidebarEl.appendChild(rh);
+    for (const wt of repo.worktrees) {
+      const row = document.createElement('button'); row.className = 'wt' + (wt.path === selectedWtPath ? ' on' : '');
+      const nm = document.createElement('div'); nm.className = 'wt-name';
+      const dot = document.createElement('span'); dot.className = 'wt-dot';
+      dot.style.background = WT_STATUS_COLOR[wt.status] || '#4a5266'; dot.title = wt.status || '';
+      const lbl = document.createElement('span'); lbl.className = 'wt-label'; lbl.textContent = wt.displayName + (wt.isMain ? '  · main' : '');
+      nm.appendChild(dot); nm.appendChild(lbl);
+      const br = document.createElement('div'); br.className = 'wt-branch'; br.textContent = wt.branch;
+      row.appendChild(nm); row.appendChild(br);
+      const wtx = Object.assign({}, wt, { repoName: repo.name });
+      row.addEventListener('click', () => {
+        selectedWtPath = wt.path;
+        _wtSig = ''; _abSig = ''; renderTabs(liveSessions);   // select highlight + top launcher immediately (sync)
+        const Ls = launchersFor(repo.name, wt.path);
+        const liveL = Ls.find((L) => liveSessionNames.has(L.sn));
+        if (liveL) { if (liveL.sn !== currentSession()) launchInWt(liveL, wt); }   // live session -> go there
+        else launchInWt(Ls[0], wt);   // no session -> auto-create + open the terminal (deterministic name -> re-click re-attaches)
+      });
+      row.oncontextmenu = (e) => { e.preventDefault(); showWtMenu(wtx, e.clientX, e.clientY); };
+      sidebarEl.appendChild(row);
+      for (const L of launchersFor(repo.name, wt.path)) {
+        if (!liveSessionNames.has(L.sn)) continue;
+        matched.add(L.sn); navSns.push(L.sn);
+        const as = document.createElement('button'); as.className = 'wt-agent' + (L.sn === cur ? ' on' : '') + (pendingSessions.has(L.sn) ? ' starting' : '');
+        as.textContent = L.label; as.title = 'click = open · right-click = kill';
+        as.addEventListener('click', () => { selectedWtPath = wt.path; _wtSig = ''; _abSig = ''; renderTabs(liveSessions); launchInWt(L, wt); });
+        as.oncontextmenu = (e) => { e.preventDefault(); simplePop(e.clientX, e.clientY, [{ hd: wt.displayName + ' / ' + L.label }, { label: 'Kill session', cls: 'danger', fn: () => killSession(L.sn) }]); };
+        sidebarEl.appendChild(as);
+      }
+    }
+  }
+  const others = liveSessions.map((s) => s.name).filter((n) => !matched.has(n));   // sessions not tied to a worktree launcher
+  if (others.length) {
+    const oh = document.createElement('div'); oh.className = 'side-hd'; oh.textContent = 'Other sessions'; sidebarEl.appendChild(oh);
+    for (const n of others) { sidebarEl.appendChild(mkTab(n)); navSns.push(n); }
+  }
+  visibleTabs = navSns.slice(0, MAX_VISIBLE_TABS);   // Ctrl/Cmd+1~9 = sessions visible in the tree
+  const rr = document.createElement('div'); rr.className = 'side-row';
+  rr.appendChild(mkIconBtn(ICONS.refresh, 'Refresh worktrees/sessions', applyLayout));
+  sidebarEl.appendChild(rr);
+}
+// top = the selected worktree's launchers (shell + agents). Running = green dot + 'on'. Click = tmux attach-or-create in that cwd.
+function renderAgentBar() {
+  const wt = findWt(selectedWtPath);
+  const cur = currentSession();
+  const sig = (wt ? wt.path : '-') + '|' + cur + '|' + tabPrefs.agents.map((a) => a.label + ':' + a.cmd).join(',')
+    + '|' + (wt ? launchersFor(wt.repoName, wt.path).map((L) => L.sn + (pendingSessions.has(L.sn) ? 'p' : (liveSessionNames.has(L.sn) ? '1' : '0'))).join(',') : '');
+  if (sig === _abSig) return;
+  _abSig = sig;
+  namesEl.textContent = '';
+  if (!wt) { const h = document.createElement('span'); h.className = 'agentbar-hint'; h.textContent = '← Select a worktree'; namesEl.appendChild(h); return; }
+  const ctx = document.createElement('span'); ctx.className = 'agentbar-ctx';   // same status color dot as the left tree -> visual link
+  const cdot = document.createElement('span'); cdot.className = 'ctx-dot'; cdot.style.background = WT_STATUS_COLOR[wt.status] || '#4a5266';
+  ctx.appendChild(cdot); ctx.appendChild(document.createTextNode(wt.repoName + ' / ' + wt.displayName)); namesEl.appendChild(ctx);
+  for (const L of launchersFor(wt.repoName, wt.path)) {
+    const live = liveSessionNames.has(L.sn);
+    const starting = pendingSessions.has(L.sn);
+    const b = document.createElement('button');
+    b.className = 'tab agent' + (L.sn === cur ? ' on' : '') + (starting ? ' starting' : (live ? ' live' : '')) + (L.cmd ? '' : ' shell');
+    b.textContent = L.label;
+    b.title = wt.displayName + ' — ' + (L.cmd || 'terminal') + (live ? ' · running' : ' · click to start');
+    b.addEventListener('click', () => launchInWt(L, wt));
+    namesEl.appendChild(b);
+  }
+  if (!tabPrefs.agents.length) {
+    const hint = document.createElement('button'); hint.className = 'mini';
+    hint.textContent = '+ Agent (settings)';
+    hint.addEventListener('pointerdown', (e) => e.preventDefault());
+    hint.addEventListener('click', openSettings);
+    namesEl.appendChild(hint);
+  }
+}
+// open a launcher: no session in that worktree -> create in cwd (run cmd after connect), else re-attach.
+function launchInWt(L, wt) {
+  if (L.sn === currentSession()) { term.focus(); return; }
+  const fresh = !liveSessionNames.has(L.sn);
+  pendingAgentCmd = fresh && L.cmd ? { sn: L.sn, cmd: L.cmd } : null;
+  if (fresh) pendingSessions.set(L.sn, Date.now() + 8000);   // optimistic: show left immediately (auto-cleared if /sessions doesn't confirm within 8s)
+  _openingSn = L.sn; showStatus(L.cmd ? L.label + ' starting…' : 'Opening terminal…');   // instant feedback — cleared on output
+  clearTimeout(_openingT);
+  _openingT = setTimeout(() => {   // no output for 6s -> success/failure verdict (No Silent Failure)
+    if (_openingSn !== L.sn) return;
+    _openingSn = null; hideTermDim();
+    if (fresh && !liveSessionNames.has(L.sn)) {   // no session at all = create failed
+      pendingSessions.delete(L.sn); _wtSig = '';
+      flash(L.label + ' failed to start — no session. Please retry.', 4500, 'error');
+      loadSessions();
+    } else hideStatus();
+  }, 6000);
+  switchToDir(L.sn, wt.path);
+}
+// worktree right-click — rename / kill all sessions / (non-main) delete.
+function showWtMenu(wt, x, y) {
+  const live = launchersFor(wt.repoName, wt.path).map((L) => L.sn).filter((sn) => liveSessionNames.has(sn));
+  const items = [{ hd: wt.displayName + ' (' + wt.branch + ')' }, { label: 'Rename', fn: () => renameWorktree(wt) }];
+  if (live.length) items.push({ label: 'Kill all sessions (' + live.length + ')', cls: 'danger', fn: () => killWtSessions(wt, live) });
+  if (!wt.isMain) items.push({ label: 'Delete worktree (Orca + git)', cls: 'danger', fn: () => rmWorktree(wt) });
+  simplePop(x, y, items);
+}
+async function renameWorktree(wt) {
+  const to = prompt('Rename worktree: "' + wt.displayName + '" ->', wt.displayName);
+  if (to === null) return;
+  const dn = to.trim(); if (!dn || dn === wt.displayName) return;
+  let j = {};
+  try { j = await postJson('orca/worktree-set', { path: wt.path, displayName: dn }); } catch (e) {}
+  if (j && j.ok) { flash('Renamed: ' + dn, 2000); applyLayout(); }
+  else flash('Rename failed: ' + ((j && j.error) || '?'), 3000, 'error');
+}
+async function killWtSessions(wt, sns) {
+  if (!confirm('Kill ' + sns.length + ' session(s) of ' + wt.displayName + '?\nRunning processes will be terminated. Continue?')) return;
+  const cur = currentSession();
+  for (const sn of sns) {
+    try { await postJson('kill-session', { name: sn }); } catch (e) {}
+    tabPrefs.hidden = tabPrefs.hidden.filter((n) => n !== sn);
+    tabPrefs.order = tabPrefs.order.filter((n) => n !== sn);
+    delete tabPrefs.colors[sn];
+  }
+  saveTabPrefs();
+  flash(sns.length + ' session(s) killed', 2000);
+  if (sns.includes(cur)) {   // don't re-attach (recreate) the killed current session -> move to another/default
+    let live = [];
+    try { live = ((await fetch('sessions', { cache: 'no-store' }).then((r) => r.json())).sessions || []).map((x) => x.name).filter((n) => !sns.includes(n)); } catch (e) {}
+    if (live.length) switchTo(live[0]); else { history.replaceState(null, '', location.pathname); switchSession(); }
+  } else loadSessions();
+}
+async function rmWorktree(wt) {
+  if (!confirm('Delete worktree: ' + wt.displayName + '\nThe checkout/branch will be removed. Continue?')) return;
+  let j = {};
+  try { j = await postJson('orca/worktree-rm', { path: wt.path }); } catch (e) {}
+  if (j && j.ok) { flash('Worktree deleted: ' + wt.displayName, 2000); if (selectedWtPath === wt.path) selectedWtPath = null; applyLayout(); }
+  else flash('Delete failed: ' + ((j && j.error) || '?'), 3200, 'error');
+}
+// add a project — reuse the folder picker (/list-dir), then orca repo add. Appears in the tree afterward.
+function openAddProject() {
+  openFolderPicker('~', async (path) => {
+    flash('Adding project… ' + path, 8000);
+    let j = {};
+    try { j = await postJson('orca/repo-add', { path: path }); } catch (e) {}
+    if (j && j.ok) { flash('Project added', 2000); applyLayout(); }
+    else flash('Add project failed: ' + ((j && j.error) || '?'), 4000, 'error');
+  });
+}
+// new worktree (Orca creates it) — name (blank = auto) + base branch. Refresh + select after.
+function openWorktreeCreate(repo) {
+  const { ov, box } = makeModal(23, 'padding:16px;width:100%;max-width:420px;');
+  const title = uiTitle('New worktree — ' + repo.name); title.style.cssText += 'margin-bottom:12px;';
+  const nameIn = document.createElement('input'); nameIn.placeholder = 'Name (blank = auto, e.g. swift-otter)';
+  nameIn.autocapitalize = 'off'; nameIn.autocomplete = 'off'; nameIn.spellcheck = false;
+  nameIn.style.cssText = 'width:100%;box-sizing:border-box;height:38px;padding:0 12px;' + UI_FIELD + 'font:14px system-ui;';
+  const baseIn = document.createElement('input'); baseIn.placeholder = 'Base branch (blank = repo default)';
+  baseIn.autocapitalize = 'off'; baseIn.autocomplete = 'off'; baseIn.spellcheck = false;
+  baseIn.style.cssText = 'width:100%;box-sizing:border-box;height:38px;margin-top:10px;padding:0 12px;' + UI_FIELD + 'font:13px ui-monospace,monospace;';
+  const note = document.createElement('div'); note.textContent = 'Orca creates the worktree (git worktree add) — it also shows in the Orca app. Blank name = auto.';
+  note.style.cssText = 'font:11.5px/1.5 system-ui;color:#7b8296;margin-top:10px;';
+  const btnRow = document.createElement('div'); btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:16px;';
+  const cancel = uiBtn('Cancel', 'ghost'); const create = uiBtn('Create', 'primary');
+  const close = () => { try { document.body.removeChild(ov); } catch (e) {} term.focus(); };
+  cancel.onclick = close;
+  const submit = async () => {
+    let name = nameIn.value.trim(); if (!name) name = randomWtName(repo);   // blank = auto (avoids collision)
+    create.disabled = true; create.textContent = 'Creating…';
+    let j = {};
+    try { j = await postJson('orca/worktree-create', { repoId: repo.id, name: name, baseBranch: baseIn.value.trim() }); } catch (e) {}
+    if (j && j.ok) {
+      close(); flash('Worktree created: ' + name, 2000);
+      const w = j.worktree || {};
+      const p = w.path || (w.worktree && w.worktree.path) || (w.result && w.result.path);
+      if (p) selectedWtPath = p;
+      applyLayout();
+    } else { create.disabled = false; create.textContent = 'Create'; flash('Create failed: ' + ((j && j.error) || '?'), 3500, 'error'); }
+  };
+  create.onclick = submit; nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  btnRow.appendChild(cancel); btnRow.appendChild(create);
+  box.appendChild(title); box.appendChild(nameIn); box.appendChild(baseIn); box.appendChild(note); box.appendChild(btnRow);
+  ov.appendChild(box); document.body.appendChild(ov);
+  setTimeout(() => nameIn.focus(), 0);
+}
+// auto worktree name (adjective-animal, avoids collisions). Math.random is fine in a browser.
+const WT_ADJ = ['swift', 'calm', 'bold', 'bright', 'keen', 'brave', 'lucid', 'vivid', 'nimble', 'sunny', 'cosmic', 'amber', 'jade', 'coral', 'misty', 'rapid', 'solar', 'lunar'];
+const WT_NOUN = ['otter', 'falcon', 'marlin', 'heron', 'lynx', 'ibex', 'wren', 'tern', 'puma', 'crane', 'fox', 'newt', 'koi', 'orca', 'seal', 'hawk', 'elk', 'carp'];
+function randomWtName(repo) {
+  const taken = new Set(((repo && repo.worktrees) || []).map((w) => w.displayName));
+  for (let i = 0; i < 40; i++) {
+    const n = WT_ADJ[Math.floor(Math.random() * WT_ADJ.length)] + '-' + WT_NOUN[Math.floor(Math.random() * WT_NOUN.length)];
+    if (!taken.has(n)) return n;
+  }
+  return 'wt-' + Math.floor(Math.random() * 100000);
+}
+// apply layout: sidebar wanted -> check Orca (async), set class + re-render tree/sessions + re-measure terminal.
+async function applyLayout() {
+  _wtSig = ''; _abSig = '';   // layout switch/refresh = force re-render
+  const want = FEAT.orca && tabPrefs.layout === 'sidebar' && !isCompact();
+  if (want) await refreshOrca();
+  const on = want && orcaReady;
+  document.getElementById('app').classList.toggle('sidebar-on', on);
+  if (want && !orcaReady) flash('Orca not running — the worktree sidebar needs Orca. Showing top tabs.', 3500);
   loadSessions();
   requestAnimationFrame(() => { try { fit.fit(); sendResize(); } catch (e) {} });
 }
@@ -1871,7 +2177,7 @@ function openSettings() {
   const { ov, box } = makeModal(23, 'padding:16px;width:100%;max-width:460px;display:flex;flex-direction:column;max-height:82vh;');
   const title = uiTitle('Settings'); title.style.cssText += 'margin-bottom:14px;flex:0 0 auto;';
   box.appendChild(title);
-  let mode = 'tabs';
+  let mode = tabPrefs.layout;
   const lhd = document.createElement('div'); lhd.textContent = 'Layout'; lhd.style.cssText = 'font:600 12px system-ui;color:#8a92a6;margin-bottom:7px;flex:0 0 auto;';
   box.appendChild(lhd);
   const seg = document.createElement('div'); seg.style.cssText = 'display:flex;gap:8px;margin-bottom:6px;flex:0 0 auto;';
@@ -1889,9 +2195,10 @@ function openSettings() {
     segBtns[val] = b; return b;
   };
   seg.appendChild(mkSeg('tabs', 'Top tabs (default)'));
+  seg.appendChild(mkSeg('sidebar', 'Sidebar + agents (experimental)'));
   box.appendChild(seg);
   const lnote = document.createElement('div');
-  lnote.textContent = "Top tabs show your terminal sessions. The Orca worktree sidebar is not included in StationDesk.";
+  lnote.textContent = "Sidebar = Orca worktree tree; top = the selected worktree's agents. Only on boxes running Orca (else top tabs). Phones keep top tabs.";
   lnote.style.cssText = 'font:11.5px/1.5 system-ui;color:#7b8296;margin:0 0 16px;flex:0 0 auto;';
   box.appendChild(lnote);
   const ahd = document.createElement('div'); ahd.textContent = 'Agents (top tabs)'; ahd.style.cssText = 'font:600 12px system-ui;color:#8a92a6;margin-bottom:7px;flex:0 0 auto;';
@@ -2118,6 +2425,17 @@ async function loadSessions() {
   } catch (e) {}
   renderTabs(list);
 }
+// in sidebar (worktree) mode only, poll lightly so session creates/kills elsewhere show live on the left.
+setInterval(() => { if (FEAT.orca && connected && effectiveLayout() === 'sidebar') loadSessions(); }, 2500);
+// low-frequency worktree-tree refresh — reflect external worktree changes + fall back to top tabs if Orca dies.
+setInterval(async () => {
+  if (!(FEAT.orca && connected && tabPrefs.layout === 'sidebar' && !isCompact())) return;
+  await refreshOrca();
+  if (orcaReady !== (effectiveLayout() === 'sidebar')) { applyLayout(); return; }   // Orca died or came back
+  if (!orcaReady) return;
+  _wtSig = ''; renderTabs(liveSessions);
+}, 9000);
+
 // ---- touch scroll (one finger) — TOUCH_SCROLL multiplier + fractional accumulation for smoothness ----
 const termEl = document.getElementById('term');
 const TOUCH_SCROLL = 3.2;   // swipe-distance -> scroll multiplier
@@ -2502,7 +2820,9 @@ applyMobileKeys();                     // decide mobile key bar + build top cont
 try {                                  // re-decide on viewport/pointer change (rotate, resize, device change)
   matchMedia('(pointer:coarse)').addEventListener('change', applyMobileKeys);
   matchMedia('(max-width:820px)').addEventListener('change', applyMobileKeys);
+  matchMedia('(max-width:820px)').addEventListener('change', applyLayout);    // auto-fallback sidebar<->top tabs on compact enter/exit
+  matchMedia('(max-height:520px)').addEventListener('change', applyLayout);
 } catch (e) {}
-applyLayout();   // render saved session tabs
+applyLayout();   // apply layout class + render session/agent bar (calls loadSessions inside)
 initSession();
 })();

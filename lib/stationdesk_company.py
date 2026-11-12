@@ -44,7 +44,10 @@ class Catalog:
         """Download index.json and the icons it names. Installed bundles are untouched."""
         base = url or self.url
         index = json.loads(download(base + 'index.json'))
-        for row in [*index.get('apps', []), *index.get('links', [])]:
+        rows = [*index.get('apps', []), *index.get('links', [])]
+        if index.get('favicon'):
+            rows.append({'id': 'favicon', 'icon': index['favicon']})
+        for row in rows:
             if row.get('icon'):
                 path = (self.directory / row['icon']).resolve()
                 if not path.is_relative_to(self.directory.resolve()):
@@ -55,6 +58,12 @@ class Catalog:
     def index(self):
         path = self.directory / 'index.json'
         return json.loads(path.read_text()) if self.enabled and path.exists() else {}
+
+    def favicon(self):
+        """The company favicon file, or None when not connected or not fetched yet."""
+        value = self.index().get('favicon', '')
+        path = (self.directory / value).resolve() if value else None
+        return path if path and path.is_relative_to(self.directory.resolve()) and path.is_file() else None
 
     def apps(self):
         return {row['id']: row for row in self.index().get('apps', [])}
@@ -77,6 +86,10 @@ class Catalog:
     def link_icons(self):
         return {row['id']: path for row in self.index().get('links', [])
                 if (path := self.link_icon(row)) is not None}
+
+    def project_icons(self):
+        for app_id, icon in self.link_icons().items():
+            write(self.root / 'web/hub/assets/company-links' / (app_id + icon.suffix), icon.read_bytes())
 
     def visible_links(self):
         state = self.root / 'state/company-links.json'

@@ -31,7 +31,7 @@ for (const [name, search, selected, args] of [
       location: {search, href: `https://station.test/devterm/${search}`, protocol: 'https:'},
       fetch: async url => { requests.push(url); return {json: async () => ({token: 'test'})}; },
       connecting: false, connected: false, ws: null, connectSeq: 0, reconnectTimer: null, switching: false,
-      _openingSn: null, reconnectAttempts: 0, token: '', enc: text => text, hideStatus() {},
+      _openingSn: null, pendingAgentCmd: null, reconnectAttempts: 0, token: '', enc: text => text, hideStatus() {},
       document: {querySelector: () => modalOpen ? {} : null},
       term: {cols: 80, rows: 24, focus() { focusCount++; }},
       showStatus() {}, scheduleReconnect() { assert.fail('unexpected reconnect'); }, onMsg() {},

@@ -172,7 +172,10 @@ class Handler(BaseHTTPRequestHandler):
                 target = web / 'index.html'
             if not target.is_relative_to(web):
                 return self.reply(403, {'error': 'outside web root'})
-            return self.reply(200, target.read_bytes(), mimetypes.guess_type(target)[0] or 'application/octet-stream')
+            data = target.read_bytes()
+            if target == web / 'index.html' and terminal.orca_installed():
+                data = data.replace(b'orca: false', b'orca: true', 1)   # worktree sidebar needs the Orca app
+            return self.reply(200, data, mimetypes.guess_type(target)[0] or 'application/octet-stream')
         except (ValueError, TypeError, KeyError):
             self.reply(400, {'error': 'invalid request'})
         except FileNotFoundError:

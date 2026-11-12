@@ -23,7 +23,9 @@ document's count. Funnel snapshots are not counted.
 The normal app ABI supplies `STATIONDESK_SHARE`, `STATIONDESK_STATE`,
 `STATIONDESK_PORT`, `STATIONDESK_OWNER`, and `STATIONDESK_FQDN`.
 External publishing works out of the box through Tailscale Funnel when no target is
-configured in `state/publish.env`. Snapshots are served at
+configured in `state/publish.env`. The public entrance stays closed until you publish a page
+externally (that turns it on) or switch it on in Settings; `stationdesk funnel on|off` is the
+same switch (`funnel = true` in `state/box.toml`), and updates leave it as you set it. Snapshots are served at
 `https://<STATIONDESK_FQDN>:10000/<slug>/` (gated ones at `/g/<slug>/`); the installer
 falls back to `:8443` when 10000 is taken and never uses 443, which is the hub. Funnel
 exposes only the dedicated snapshot directories under `state/publish/` (never the private

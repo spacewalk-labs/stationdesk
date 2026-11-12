@@ -43,7 +43,7 @@
   if (document.getElementById(ID)) return;
   var mode = "floating";
   var targetSelector = "#stationdesk-slot";
-  var anchor = "bottom-left";
+  var anchor = "bottom-right";
   var wantMenu = true;
   var accountBase = "";
   var secretBase = "";
@@ -57,7 +57,7 @@
     if (self && self.dataset) {
       if (self.dataset.mode === "corner" || self.dataset.mode === "native") mode = self.dataset.mode;
       if (self.dataset.target) targetSelector = self.dataset.target;
-      if (self.dataset.anchor === "bottom-right") anchor = "bottom-right";
+      if (self.dataset.anchor === "bottom-left") anchor = "bottom-left";
       if (self.dataset.menu === "1") wantMenu = true;
       if (self.dataset.accountPanel) accountBase = baseUrl(self.dataset.accountPanel);
       if (self.dataset.secretPanel) secretBase = baseUrl(self.dataset.secretPanel);
@@ -70,7 +70,7 @@
   var useMenu = wantMenu;
   var HUB = baseUrl(self && self.dataset.hubUrl || location.origin);
   accountBase = accountBase || HUB + "accounts/";
-  secretBase = wantSecret ? secretBase || HUB + "devterm/?secret=1" : "";
+  secretBase = wantSecret ? secretBase || HUB + "devterm/secret.html" : "";   // the form alone, no terminal
   var UNREAD_URL = "/monitor/api/owner/messages/preview";
   var ALERT_URL = wantBadge ? "/accounts/status.json" : "";
   var POLL_MS = 30000;
@@ -83,15 +83,17 @@
     var ms = Number(value);
     return Number.isFinite(ms) && ms > 0 ? Math.min(ms, cap || Infinity) : fallback;
   }
+  function stationdeskPeekTime(card) { return card.peek_at || card.last_at; }
   function stationdeskPeekCompare(a, b) {
-    if (a.last_at !== b.last_at) return a.last_at < b.last_at ? -1 : 1;
+    var at = stationdeskPeekTime(a), bt = stationdeskPeekTime(b);
+    if (at !== bt) return at < bt ? -1 : 1;
     return a.card_id === b.card_id ? 0 : a.card_id < b.card_id ? -1 : 1;
   }
   function stationdeskSelectPeeks(messages, seen, pending) {
     if (!seen) {
       seen = { last_at: "", card_id: "" };
       messages.forEach(function (card) {
-        if (stationdeskPeekCompare(card, seen) > 0) seen = { last_at: card.last_at, card_id: card.card_id };
+        if (stationdeskPeekCompare(card, seen) > 0) seen = { last_at: stationdeskPeekTime(card), card_id: card.card_id };
       });
       return { seen: seen, cards: [] };
     }
@@ -304,7 +306,7 @@
     if (savedPeek && typeof savedPeek.last_at === "string" && typeof savedPeek.card_id === "string") peekSeen = savedPeek;
   } catch (e) {}
   function savePeekSeen(seen) {
-    peekSeen = { last_at: seen.last_at, card_id: seen.card_id };
+    peekSeen = { last_at: stationdeskPeekTime(seen), card_id: seen.card_id };
     try { localStorage.setItem(PEEK_KEY, JSON.stringify(peekSeen)); } catch (e) {}
   }
   function receivePeeks(messages) {
@@ -389,7 +391,7 @@
   window.addEventListener("resize", refreshPlacement);
   window.addEventListener("stationdesk:layout-changed", refreshPlacement);
   window.addEventListener("scroll", positionPeek, true);
-  var RING_BASE = S.boxShadow;
+  var RING_BASE = S.boxShadow, BTN_TITLE = btn.title;
   var alertLevel = "", alertInfo = null, blinkTimer = null, blinkOn = false;
   function paintRing() {
     if (blinkTimer) { clearInterval(blinkTimer); blinkTimer = null; }
@@ -408,6 +410,9 @@
     } else {
       S.boxShadow = RING_BASE;
     }
+    // Hovering a lit ring names its reason before anything is opened.
+    var why = ringReason(alertInfo);
+    btn.title = why ? why + " — " + BTN_TITLE : BTN_TITLE;
     motion();
   }
   function pollAlert() {
@@ -434,25 +439,40 @@
     var r = btn.getBoundingClientRect(), mh = menuEl.offsetHeight, mw = menuEl.offsetWidth;
     var top = r.bottom + 8, left = r.left;
     if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 8);
-    if (left + mw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - mw - 8);
+    // Near the right edge the menu opens leftward, its right edge on the button's.
+    if (left + mw > window.innerWidth - 8) left = Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8));
     menuEl.style.top = top + "px";
     menuEl.style.left = left + "px";
   }
   function closeModal() { if (modalEl) { modalEl.remove(); modalEl = null; pollAlert(); } }
-  function menuRow(label, sub, onClick) {
+  // The ring's colours. A row that lit the ring wears the same colour, so the menu
+  // shows where the ring's colour comes from; every other hint stays grey.
+  var RING = { warn: { line: "#e6b34d", fill: "rgba(230,179,77,.12)" },
+               crit: { line: "#e05a5a", fill: "rgba(224,90,90,.14)" } };
+  function menuRow(label, sub, onClick, level) {
+    var lit = RING[level];
     var b = document.createElement("button");
     b.type = "button";
-    b.style.cssText = "display:block;width:100%;text-align:left;border:none;background:transparent;" +
+    var rest = lit ? lit.fill : "transparent";
+    b.style.cssText = "display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:none;background:" + rest + ";" +
+      (lit ? "box-shadow:inset 3px 0 0 " + lit.line + ";" : "") +
       "color:#e8ecf4;font:13.5px/1.35 -apple-system,system-ui,sans-serif;padding:11px 14px;cursor:pointer;";
-    var t = document.createElement("div"); t.textContent = label; b.appendChild(t);
+    if (lit) {
+      var dot = document.createElement("span");
+      dot.style.cssText = "flex:none;width:8px;height:8px;border-radius:50%;background:" + lit.line + ";";
+      b.appendChild(dot);
+    }
+    var body = document.createElement("div"); body.style.cssText = "flex:1;min-width:0;";
+    var t = document.createElement("div"); t.textContent = label; body.appendChild(t);
     if (sub) {
       var sEl = document.createElement("div");
       sEl.textContent = sub;
-      sEl.style.cssText = "margin-top:2px;font-size:11.5px;color:#e6b34d;";
-      b.appendChild(sEl);
+      sEl.style.cssText = "margin-top:2px;font-size:11.5px;color:" + (lit ? lit.line : "#B2B6BD") + ";";
+      body.appendChild(sEl);
     }
-    b.addEventListener("mouseenter", function () { b.style.background = "rgba(255,255,255,.07)"; });
-    b.addEventListener("mouseleave", function () { b.style.background = "transparent"; });
+    b.appendChild(body);
+    b.addEventListener("mouseenter", function () { b.style.background = lit ? lit.fill.replace(/[\d.]+\)$/, ".2)") : "rgba(255,255,255,.07)"; });
+    b.addEventListener("mouseleave", function () { b.style.background = rest; });
     b.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onClick(); });
     return b;
   }
@@ -533,7 +553,7 @@
   // Account rows read the status this script already polls for the ring. Every action
   // opens the hub's account sheet in a panel, so sign-in and sign-out have one implementation.
   // Colours are the dark StationDesk tokens: this menu runs on pages without them.
-  var accountsEl = null, accountsSum = null;
+  var accountsEl = null;
   var TONE = { "in": "#30d158", alert: "#ff6961", out: "#B2B6BD", none: "#465366" };
   function accountRow(a) {
     var row = (alertInfo.agents || []).filter(function (r) { return r.id === a[0]; })[0] || { id: a[0], status: "unknown" };
@@ -581,21 +601,78 @@
     });
     return li;
   }
+  // Why the ring is lit, in one sentence: the accounts app's grade of the account in use
+  // first, else the sign-in rows that raised the status. A lit ring always has a reason.
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function alertText(a) {
+    if (!a || a.level === "none") return "";
+    function at(iso) {
+      var d = iso ? new Date(iso) : null;
+      if (!d || isNaN(d.getTime())) return "";
+      var hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+      return " · " + t("resets " + MONTHS[d.getMonth()] + " " + d.getDate() + ", " + hm,
+                       (d.getMonth() + 1) + "월 " + d.getDate() + "일 " + hm + " 리셋");
+    }
+    if (a.reason === "login") return t("Claude sign-in expires in " + a.rtDays + " days", "Claude 다시 로그인까지 " + a.rtDays + "일");
+    if (a.reason === "codex-login") return t("Codex signed out · sign in again", "Codex 로그아웃됨 · 다시 로그인");
+    if (a.reason === "codex") return t("Codex weekly usage ", "Codex 주간 사용량 ") + a.codexUse7d + "%" + at(a.codexReset7d);
+    // Name the window that tripped, graded on its own thresholds (5h and weekly differ);
+    // at equal grade the weekly one lasts longer, so it is the one to know.
+    var th = a.thresholds || {};
+    function grade(use, warn, crit) { return use == null ? 0 : use >= crit ? 2 : use >= warn ? 1 : 0; }
+    var five = grade(a.use5h, th.warn5, th.crit5) > grade(a.use7d, th.warn7, th.crit7);
+    return five ? t("Claude 5-hour usage ", "Claude 5시간 사용량 ") + a.use5h + "%" + at(a.reset5h)
+      : t("Claude weekly usage ", "Claude 주간 사용량 ") + a.use7d + "%" + at(a.reset7d);
+  }
+  function ringReason(info) {
+    if (!alertLevel || !info) return "";
+    // The grade speaks for the ring only when it set the ring's colour; a signed-out CLI
+    // under a merely busy account is red, and red must name the sign-out.
+    var a = info.account_alert, text = a && a.level === alertLevel ? alertText(a) : "";
+    if (text) return text;
+    var known = info.known || [];
+    var names = {};
+    ACCOUNT_AGENTS.forEach(function (a) { names[a[0]] = a[1]; });
+    var rows = (info.agents || []).filter(function (r) { return known.indexOf(r.id) >= 0; });
+    var out = rows.filter(function (r) { return r.status === "logged_out"; })[0];
+    if (out) return t(names[out.id] + " signed out · sign in again", names[out.id] + " 로그아웃됨 · 다시 로그인");
+    var unread = rows.filter(function (r) { return r.logged_in == null; })[0];
+    if (unread) return t("Couldn't check " + names[unread.id] + " sign-in", names[unread.id] + " 로그인 상태를 확인하지 못함");
+    return alertText(a) || t("An account needs attention", "계정 확인 필요");
+  }
   function renderAccounts() {
     if (!accountsEl) return;
     accountsEl.textContent = "";
+    if (alertInfo && typeof alertInfo.account_panel === "string" && alertInfo.account_panel) {
+      // One row like its neighbours; when the ring is lit, this row says why, in the ring's colour.
+      var panelUrl = new URL(alertInfo.account_panel, HUB).href;
+      accountsEl.appendChild(menuRow(t("Subscription accounts", "구독 계정"), ringReason(alertInfo), function () {
+        openPanel("accounts", t("Subscription accounts", "구독 계정"),
+          panelUrl, 720, 640);
+      }, alertLevel));
+      return;
+    }
     if (!alertInfo || !alertInfo.agents) {
       // No status to show: the account page is still one click away.
-      accountsSum.textContent = "";
-      accountsEl.appendChild(menuRow(t("Open agent accounts", "에이전트 계정 열기"), "", function () {
+      accountsEl.appendChild(menuRow(t("Agent accounts", "에이전트 계정"), "", function () {
         openPanel("accounts", t("Agent accounts", "에이전트 계정"), accountBase);
       }));
       return;
     }
+    // Four sign-in rows are a group, so only they get a heading and rules around them.
+    var cap = document.createElement("div");
+    cap.style.cssText = "display:flex;justify-content:space-between;padding:8px 14px 2px;" +
+      "font:600 12px/1.2 -apple-system,system-ui,sans-serif;color:#B2B6BD;";
+    var capName = document.createElement("span");
+    capName.textContent = t("Agent accounts", "에이전트 계정");
+    var sum = accountSummary(alertInfo), capSum = document.createElement("span");
+    capSum.textContent = sum.text;
+    capSum.style.color = sum.alert ? TONE.alert : "#B2B6BD";
+    cap.appendChild(capName); cap.appendChild(capSum);
+    accountsEl.appendChild(separator());
+    accountsEl.appendChild(cap);
     ACCOUNT_AGENTS.forEach(function (a) { accountsEl.appendChild(accountRow(a)); });
-    var sum = accountSummary(alertInfo);
-    accountsSum.textContent = sum.text;
-    accountsSum.style.color = sum.alert ? TONE.alert : "#B2B6BD";
+    accountsEl.appendChild(separator());
   }
   function separator() {
     var s = document.createElement("div");
@@ -613,20 +690,10 @@
     accountsEl = null;
     // Rows fill in when the status poll answers; without polling the panel is the way in.
     if (accountBase && ALERT_URL) {
-      m.appendChild(separator());
-      var cap = document.createElement("div");
-      cap.style.cssText = "display:flex;justify-content:space-between;padding:8px 14px 2px;" +
-        "font:600 12px/1.2 -apple-system,system-ui,sans-serif;color:#B2B6BD;";
-      var capName = document.createElement("span");
-      capName.textContent = t("Agent accounts", "에이전트 계정");
-      accountsSum = document.createElement("span");
-      cap.appendChild(capName); cap.appendChild(accountsSum);
-      m.appendChild(cap);
       accountsEl = document.createElement("div");
       m.appendChild(accountsEl);
       renderAccounts();
       pollAlert();
-      m.appendChild(separator());
     } else if (accountBase) {
       m.appendChild(menuRow(t("Agent accounts", "에이전트 계정"), "", function () {
         openPanel("accounts", t("Agent accounts", "에이전트 계정"), accountBase);
@@ -634,11 +701,11 @@
     }
     if (secretBase) {
       m.appendChild(menuRow(t("Secret drop", "시크릿 전달"), document.getElementById("secret-open")
-        ? t("value stays on the box · path only", "값은 박스에 보관 · 경로만 전달")
-        : t("Opens Terminal · sends a path to its session", "터미널에서 열기 · 터미널 세션에 경로 전달"), function () {
+        ? t("Value stays on this box · sends only the path", "값은 박스에 보관 · 경로만 전달")
+        : t("Value stays on this box · copies only the path", "값은 박스에 보관 · 경로만 복사"), function () {
         var localSecret = document.getElementById("secret-open");
         if (localSecret) { closeMenu(); localSecret.click(); }
-        else openPanel("secret", t("Secret drop", "시크릿 전달"), secretBase);
+        else openPanel("secret", t("Secret drop", "시크릿 전달"), secretBase, 420, 340);
       }));
     }
     (document.body || document.documentElement).appendChild(m);
@@ -738,4 +805,82 @@
   window.addEventListener("stationdesk:messages-changed", pollUnread);
   if (document.body) mount();
   else document.addEventListener("DOMContentLoaded", mount, { once: true });
+})();
+
+/* Tab-icon colour: this box's colour behind every StationDesk page's favicon, so
+ * several StationDesks can be told apart in one tab strip. The owner picks a name
+ * in hub settings; nginx serves it as /stationdesk-frame.json on every origin, and
+ * no file means no change. Paseo re-assigns its favicon every few seconds while
+ * agents run (measured 2026-11-10), so a repaint timer loses: instead the icon
+ * link answers reads with the app's own URL and turns each write into the framed
+ * picture. The app sees nothing changed, and its status dot lands inside the
+ * frame the moment it switches. The minute check only catches a replaced link.
+ */
+(function () {
+  "use strict";
+  var COLORS = [["orange", "#EA580C", "Orange", "주황"], ["blue", "#0284C7", "Blue", "파랑"],
+                ["teal", "#0D9488", "Teal", "청록"], ["purple", "#A855F7", "Purple", "보라"],
+                ["green", "#16A34A", "Green", "초록"], ["red", "#DC2626", "Red", "빨강"],
+                ["pink", "#EC4899", "Pink", "분홍"]];
+  var SIZE = 32, INSET = 3, RADIUS = 8;
+  var native = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, "href");
+  var fill = null, cache = {};   // cache: colour + icon URL -> framed picture
+
+  function framed(src, color, done) {
+    var key = color + src;
+    if (cache[key]) return done(cache[key]);
+    var img = new Image();
+    img.onload = function () {
+      var canvas = document.createElement("canvas");
+      canvas.width = canvas.height = SIZE;
+      var g = canvas.getContext("2d");
+      g.fillStyle = color;
+      g.beginPath(); g.roundRect(0, 0, SIZE, SIZE, RADIUS); g.fill();
+      g.drawImage(img, INSET, INSET, SIZE - 2 * INSET, SIZE - 2 * INSET);
+      try { done(cache[key] = canvas.toDataURL("image/png")); } catch (_) {}  // foreign icon: leave it
+    };
+    img.src = src;
+  }
+
+  function adopt(link) {
+    if (link.stationdeskShow) return;
+    var src = native.get.call(link);
+    function show(url) {
+      var want = src = new URL(url, location.href).href, color = fill;
+      if (!color) return native.set.call(link, src);
+      framed(src, color, function (data) {   // a slow load must not paint over a newer icon or colour
+        if (src === want && fill === color) { link.type = "image/png"; native.set.call(link, data); }
+      });
+    }
+    Object.defineProperty(link, "href", { configurable: true, get: function () { return src; }, set: show });
+    link.stationdeskShow = show;
+    show(src);
+  }
+
+  function check() {
+    if (fill) document.querySelectorAll('link[rel~="icon"]').forEach(adopt);
+  }
+
+  function load() {
+    fetch("/stationdesk-frame.json", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .catch(function () { return null; })
+      .then(function (value) {
+        var hit = COLORS.filter(function (c) { return value && c[0] === value.color; })[0];
+        var next = hit ? hit[1] : null;
+        if (next !== fill) {
+          fill = next;
+          document.querySelectorAll('link[rel~="icon"]').forEach(function (link) {
+            if (link.stationdeskShow) link.stationdeskShow(link.href);
+          });
+        }
+        check();
+      });
+  }
+
+  window.StationDeskFrame = { colors: COLORS, reload: load };
+  if (window.top !== window.self) return;          // hidden inside iframes/previews
+  load();
+  setInterval(check, 60000);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) load(); });
 })();

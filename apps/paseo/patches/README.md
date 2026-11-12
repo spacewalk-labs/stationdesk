@@ -362,3 +362,29 @@ warn and continue; the installer is the authority for each patch's handling.
 Before 2026-10-11, skipped anchors only produced warnings; that earlier behavior
 allowed a fix to be lost during the 0.8.0 upgrade. Port a drifting patch or record
 an intentional skip alongside the bundle change.
+
+
+- **`crash-recovery.mjs` + `crash-recovery.js` + `.test.mjs`** — the guarded 0.8.0
+  supervisor restarts a crashed worker but does not continue its interrupted conversations.
+  The shipped bundle now captures `running` records once at startup, saves a continuation intent
+  before loading the existing provider conversation, and uses the existing guarded send and
+  durable request journal. Successful start retires the intent before completing the receipt;
+  an uncertain send keeps its intent and error for inspection and is never automatically replayed.
+  Explicit Stop is persisted before provider cancellation. Archived/internal/daemon-owned seats,
+  archived workspaces, missing provider handles and pending permissions are excluded. Permission waits are stored before they become visible
+  through RPC, and the marker follows permission resolution/cancellation snapshots. Live permission
+  and Stop checks run again inside the guarded lifecycle lane. No timer or daemon is added.
+  The test uses actual 0.8 storage, manager guards and request receipts with a deterministic provider
+  boundary; it kills only its own child workers at intent, pending-send and accepted-start boundaries.
+  Run it against an extracted server with its npm dependencies, never an active installation:
+  `node patches/crash-recovery.test.mjs /path/to/extracted/package`.
+  This is crash recovery, not an OOM leak fix: retained active timelines can still reach V8's heap
+  limit; the existing idle-unload behavior and explicit service configuration are unchanged.
+  On first adoption, the previous runtime's markerless records cannot prove that no permission
+  wait or human Stop existed. Inspect live permission/work inventories through the normal RPC
+  before restarting that runtime; keep its existing recovery manifest outside the restarted unit.
+  Only a running record whose new runtime stored a known false permission marker is automatically
+  continued. Legacy running records normalize to closed and use that existing one-time outpost
+  recovery path; marker absence never becomes proof of permission clearance.
+  Historical idle/closed records stay idle/closed. A pending recovery request receipt remains an
+  uncertain outcome requiring inspection; automatic recovery never bypasses it.

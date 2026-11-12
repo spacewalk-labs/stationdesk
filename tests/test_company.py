@@ -55,6 +55,55 @@ class CompanyTests(unittest.TestCase):
         with patch('hub.subprocess.run', return_value=engine.subprocess.CompletedProcess([], 1, '', '')):
             return {row['id'] for row in Hub(self.root).updates()['apps']}
 
+    def test_fetch_keeps_the_company_favicon(self):
+        from stationdesk_company import Catalog
+        url = self.publish('inline-app', 'v1')
+        place = self.place()
+        (place / 'icons/favicon.png').write_bytes(b'png')
+        index = json.loads((place / 'index.json').read_text())
+        (place / 'index.json').write_text(json.dumps(index | {'favicon': 'icons/favicon.png'}))
+        catalog = Catalog(self.root)
+        catalog.fetch(url)
+        (self.root / 'state/box.toml').write_text(f'company = "{url}"\n')
+        self.assertEqual(b'png', catalog.favicon().read_bytes())
+
+    def test_manual_catalog_refresh_discovers_link_without_upgrading_apps(self):
+        import os
+        from test_monitor import HandlerTests
+
+        url = self.publish('inline-app', 'v1', 'installed version')
+        self.engine.company(url)
+        self.engine.add('company:inline-app')
+        installed_before = (self.root / 'state/installed.json').read_bytes()
+        icon = '<svg><title>New Folio icon</title></svg>'
+        (self.place() / 'icons/folio.svg').write_text(icon)
+        self.publish('inline-app', 'v2', 'available version', links=[
+            {'id': 'folio', 'name': 'Folio', 'url': 'https://notes.example.test/', 'icon': 'icons/folio.svg'}])
+        self.assertNotIn('folio', self.rows()[1])
+        with patch.dict(os.environ, {'STATIONDESK_ROOT': str(self.root),
+                                   'STATIONDESK_OWNER': 'owner@example.test', 'STATIONDESK_FQDN': 'desk.test'}), \
+                patch.object(Hub, 'updates', return_value={'apps': [], 'platform': {'available': False}}):
+            status, answer = HandlerTests().request(body=b'{}', path='/api/owner/company/refresh', origin='https://desk.test')
+        self.assertEqual(200, status)
+        row = next(row for row in answer['rows'] if row['id'] == 'folio')
+        self.assertEqual('install', row['state'])
+        self.assertEqual('company', row['origin'])
+        self.assertEqual('/assets/company-links/folio.svg', row['icon'])
+        self.assertEqual(icon, (self.root / 'web/hub/assets/company-links/folio.svg').read_text())
+        self.assertEqual(installed_before, (self.root / 'state/installed.json').read_bytes())
+        self.assertEqual('installed version',
+                         (self.root / 'web/inline-app/index.html').read_text())
+        # A failed download keeps the previously fetched catalog available.
+        (self.place() / 'index.json').unlink()
+        catalog_before = (self.root / 'company/index.json').read_bytes()
+        with patch.dict(os.environ, {'STATIONDESK_ROOT': str(self.root),
+                                   'STATIONDESK_OWNER': 'owner@example.test', 'STATIONDESK_FQDN': 'desk.test'}):
+            status, answer = HandlerTests().request(body=b'{}', path='/api/owner/company/refresh', origin='https://desk.test')
+        self.assertEqual(502, status)
+        self.assertIn('error', answer)
+        self.assertEqual(catalog_before, (self.root / 'company/index.json').read_bytes())
+
+
     def test_connect_install_links_disconnect_and_remove(self):
         url = self.publish('inline-app', 'v1', links=[
             {'id': 'docs', 'name': 'Company docs', 'url': 'https://example.test/company'}])
@@ -307,7 +356,8 @@ class CompanyTests(unittest.TestCase):
 
     def test_dynamic_endpoints_share_owner_gate_and_reconcile_mapping_ownership(self):
         path, initial, replacement = self.endpoint_fixture()
-        with patch.object(self.engine, 'identity', return_value=('owner@example.test', 'desk.example.test')):
+        with patch.object(self.engine, 'identity', return_value=('owner@example.test', 'desk.example.test')), \
+                patch.object(self.engine, 'on_tailnet', return_value=True):
             self.engine.add('multiport')
             self.assertEqual([initial], self.engine.endpoints('multiport'))
             site = (self.root / 'nginx/site.conf').read_text()
@@ -346,7 +396,8 @@ class CompanyTests(unittest.TestCase):
 
     def test_endpoint_nginx_failure_restores_previous_projection_and_mapping_ownership(self):
         path, initial, replacement = self.endpoint_fixture()
-        with patch.object(self.engine, 'identity', return_value=('owner@example.test', 'desk.example.test')):
+        with patch.object(self.engine, 'identity', return_value=('owner@example.test', 'desk.example.test')), \
+                patch.object(self.engine, 'on_tailnet', return_value=True):
             self.engine.add('multiport')
             site = self.root / 'nginx/site.conf'
             fragment = self.root / 'nginx/apps.d/multiport-endpoint-18823.conf'
@@ -376,7 +427,8 @@ class CompanyTests(unittest.TestCase):
         fragment = self.root / 'nginx/apps.d/inline-app-endpoint-18823.conf'
         artifact = dict(kind='path', path=str(fragment))
         extra = 'endpoints = "folio/editor-endpoints.json"\n'
-        with patch.object(self.engine, 'identity', return_value=('owner@example.test', 'desk.example.test')):
+        with patch.object(self.engine, 'identity', return_value=('owner@example.test', 'desk.example.test')), \
+                patch.object(self.engine, 'on_tailnet', return_value=True):
             self.engine.company(self.publish('inline-app', 'v1', extra=extra))
             self.engine.add('company:inline-app')
             self.assertIn(artifact, self.engine.load()['apps']['inline-app']['artifacts'])

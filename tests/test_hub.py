@@ -72,6 +72,19 @@ class HubTests(unittest.TestCase):
             self.assertEqual('remove', self.hub.remove_link(result['id'])['run_id'])
         remove.assert_called_once_with('remove', result['id'])
 
+    def test_frame_stores_a_name_clears_to_no_file_and_rejects_anything_else(self):
+        path = self.root / 'state/frame.json'
+        self.assertEqual({'color': 'orange'}, self.hub.frame('orange'))
+        self.assertEqual({'color': 'orange'}, json.loads(path.read_text()))
+        self.assertEqual(0o644, path.stat().st_mode & 0o777)   # nginx serves it as a static file
+        self.assertEqual({'color': ''}, self.hub.frame(''))
+        self.assertFalse(path.exists())
+        self.hub.frame('')                                      # clearing twice is fine
+        for bad in ('#EA580C', 'Orange', '../x', None, 7, 'a' * 17):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.hub.frame(bad)
+        self.assertFalse(path.exists())
+
     def test_link_rejects_credentials_and_http_without_writing(self):
         for url in ['http://example.test', 'https://user:password@example.test', 'https://example.test/a b']:
             with self.subTest(url=url), self.assertRaises(ValueError):
@@ -99,6 +112,10 @@ class HubTests(unittest.TestCase):
             rows = {row['id']: row for row in self.hub.apps()['rows']}
         self.assertEqual('builtin', rows['hello']['origin'])
         self.assertEqual('StationDesk', rows['hello']['source'])
+        self.assertEqual('', rows['hello']['settings_script'])
+        (self.root / 'examples/hello/app.toml').write_text('label="App"\nicon="icon.svg"\nport=19940\nsettings_script="/hello/settings.js"\n')
+        with patch.object(Hub, 'updates', return_value={'apps': [], 'platform': {'available': None}}):
+            self.assertEqual('/hello/settings.js', {row['id']: row for row in self.hub.apps()['rows']}['hello']['settings_script'])
         self.assertEqual('link', rows[link]['origin'])
         self.assertFalse((self.root / 'state/personal-apps.json').exists())
 

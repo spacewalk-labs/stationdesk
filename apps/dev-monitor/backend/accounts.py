@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import urllib.request
 
 from state_write import WRITE_LOCK
 
@@ -96,8 +97,44 @@ def status(root):
                 Path(temporary).unlink(missing_ok=True)
     critical = any(row['id'] in known and row['logged_in'] is False for row in rows)
     warning = any(row['id'] in known and row['logged_in'] is None for row in rows)
-    return dict(agents=rows, needs_login=not known, known=sorted(known),
-                status='critical' if critical else 'warning' if warning else 'ok')
+    result = dict(agents=rows, needs_login=not known, known=sorted(known),
+                  status='critical' if critical else 'warning' if warning else 'ok')
+    # An installed accounts app can supply its own panel, and the grade of the account
+    # in use (a spent quota is as unusable as a signed-out CLI). Without it, the public
+    # product keeps the vendor sign-in rows. App removal removes this web asset too.
+    panel = Path(root) / 'web/accounts/porthole.json'
+    try:
+        hook = json.loads(panel.read_text()) if panel.is_file() else {}
+    except (OSError, ValueError):
+        hook = {}
+    hook = hook if isinstance(hook, dict) else {}
+    if isinstance(hook.get('account_panel'), str):
+        result['account_panel'] = hook['account_panel']
+    alert = account_alert(hook.get('account_alert'))
+    if alert:
+        result['account_alert'] = alert
+        rank = ['ok', 'warning', 'critical']
+        level = {'warn': 'warning', 'crit': 'critical'}.get(alert['level'], 'ok')
+        result['status'] = max(result['status'], level, key=rank.index)
+    return result
+
+
+ALERT_FIELDS = ('level', 'reason', 'use5h', 'use7d', 'reset5h', 'reset7d', 'rtDays', 'codexUse7d', 'codexReset7d',
+                'thresholds')
+
+
+def account_alert(url):
+    """The accounts app's grade of the account in use, read over loopback. Unreadable = no grade."""
+    if not isinstance(url, str) or not url.startswith('http://127.0.0.1:'):
+        return None
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            data = json.loads(response.read())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get('level') not in ('none', 'warn', 'crit'):
+        return None
+    return {key: data.get(key) for key in ALERT_FIELDS}
 
 
 
